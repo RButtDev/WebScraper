@@ -1,0 +1,1088 @@
+Himport os
+import sys
+import shutil
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import threading
+from pathlib import Path
+import time
+import tempfile
+import subprocess
+import json
+import uuid
+import re
+from bs4 import BeautifulSoup
+
+# Ensure required packages are installed
+try:
+    from PyPDF2 import PdfMerger, PdfReader, PdfWriter
+    import customtkinter as ctk
+    from ttkthemes import ThemedTk
+    from bs4 import BeautifulSoup
+except ImportError:
+    import subprocess
+
+    print("Installing required packages...")
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "PyPDF2", "customtkinter", "ttkthemes", "beautifulsoup4"])
+    from PyPDF2 import PdfMerger, PdfReader, PdfWriter
+    import customtkinter as ctk
+    from ttkthemes import ThemedTk
+    from bs4 import BeautifulSoup
+
+
+class PDFMerger:
+    def __init__(self):
+        self.pdf_files = []
+        self.output_file = ""
+        self.stop_requested = False
+        self.current_file = 0
+        self.total_files = 0
+
+    def merge_pdfs(self, pdf_files, output_file, progress_callback=None, file_callback=None, status_callback=None):
+        """Merge multiple PDF files into one PDF file"""
+        self.stop_requested = False
+        self.pdf_files = pdf_files
+        self.output_file = output_file
+        self.current_file = 0
+        self.total_files = len(pdf_files)
+
+        try:
+            merger = PdfMerger()
+
+            for pdf_file in pdf_files:
+                if self.stop_requested:
+                    status_callback("PDF merging stopped by user")
+                    break
+
+                self.current_file += 1
+                file_name = os.path.basename(pdf_file)
+                file_callback(f"Adding {file_name} ({self.current_file}/{self.total_files})")
+
+                # Update progress
+                if progress_callback:
+                    progress_callback(self.current_file, self.total_files)
+
+                try:
+                    # Add PDF to merger
+                    merger.append(pdf_file)
+                    status_callback(f"Added: {file_name}")
+                except Exception as e:
+                    status_callback(f"Failed to add {file_name}: {str(e)}")
+
+            if not self.stop_requested and self.current_file > 0:
+                # Write merged PDF
+                status_callback(f"Creating merged PDF: {os.path.basename(output_file)}")
+                merger.write(output_file)
+                merger.close()
+                status_callback(f"Merged PDF created successfully: {os.path.basename(output_file)}")
+                return True
+            else:
+                return False
+
+        except Exception as e:
+            status_callback(f"Error during PDF merging: {str(e)}")
+            return False
+
+    def stop_merging(self):
+        """Signal to stop the merging process"""
+        self.stop_requested = True
+
+
+class ChromeHTMLToPDFConverter:
+    def __init__(self):
+        self.html_files = []
+        self.output_dir = ""
+        self.stop_requested = False
+        self.current_file = 0
+        self.total_files = 0
+        self.successful_conversions = 0
+        self.failed_conversions = 0
+
+    def find_chrome_executable(self):
+        """Find Chrome or Chromium executable on the system"""
+        # Possible paths for Chrome/Chromium on different OS
+        if sys.platform == 'win32':
+            chrome_paths = [
+                # Chrome paths
+                os.path.expandvars(r'%ProgramFiles%\Google\Chrome\Application\chrome.exe'),
+                os.path.expandvars(r'%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe'),
+                os.path.expandvars(r'%LocalAppData%\Google\Chrome\Application\chrome.exe'),
+                # Edge paths (Chromium-based)
+                os.path.expandvars(r'%ProgramFiles%\Microsoft\Edge\Application\msedge.exe'),
+                os.path.expandvars(r'%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe'),
+                # Brave paths
+                os.path.expandvars(r'%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe'),
+                os.path.expandvars(r'%ProgramFiles(x86)%\BraveSoftware\Brave-Browser\Application\brave.exe'),
+            ]
+        elif sys.platform == 'darwin':  # macOS
+            chrome_paths = [
+                '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+                '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+                '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+            ]
+        else:  # Linux and others
+            chrome_paths = [
+                '/usr/bin/google-chrome',
+                '/usr/bin/google-chrome-stable',
+                '/usr/bin/chromium',
+                '/usr/bin/chromium-browser',
+                '/usr/bin/microsoft-edge',
+                '/usr/bin/brave-browser',
+            ]
+
+        # Check if paths exist
+        for path in chrome_paths:
+            if os.path.exists(path):
+                print(f"Found Chrome/Chromium at: {path}")
+                return path
+
+        # If not found, try using 'which' on Unix-like systems
+        if sys.platform != 'win32':
+            try:
+                chrome_path = subprocess.check_output(['which', 'google-chrome'],
+                                                      stderr=subprocess.STDOUT).decode().strip()
+                if os.path.exists(chrome_path):
+                    print(f"Found Chrome using 'which' at: {chrome_path}")
+                    return chrome_path
+            except subprocess.CalledProcessError:
+                pass
+
+        return None
+
+    def remove_cookie_banners(self, html_content):
+        """Remove common cookie consent banners from HTML content"""
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+
+            # Common class and ID patterns for cookie banners
+            banner_classes = [
+                'cookie-banner', 'cookie-consent', 'cookie-notice', 'cookie-policy',
+                'cookie-popup', 'cookie-alert', 'cookie-warning', 'cookie-message',
+                'gdpr-banner', 'gdpr-consent', 'gdpr-notice', 'gdpr-popup',
+                'consent-banner', 'consent-popup', 'eu-cookie-compliance',
+                'privacy-banner', 'privacy-notice', 'privacy-policy-banner'
+            ]
+
+            banner_ids = [
+                'cookie-banner', 'cookie-consent', 'cookie-notice', 'cookie-policy',
+                'cookie-popup', 'cookie-alert', 'cookieConsent', 'cookieNotice',
+                'gdpr-banner', 'gdpr-consent', 'gdpr-notice', 'gdprConsent',
+                'consent-banner', 'consentPopup', 'privacy-banner', 'privacyNotice'
+            ]
+
+            # Text indicators for cookie banners
+            banner_texts = [
+                'cookie', 'cookies', 'gdpr', 'consent', 'accept cookies',
+                'privacy policy', 'privacy notice', 'we use cookies',
+                'cookie policy', 'cookie consent', 'cookie settings',
+                'this site uses cookies', 'this website uses cookies'
+            ]
+
+            # Try to find elements with specific classes
+            for class_name in banner_classes:
+                for element in soup.find_all(class_=re.compile(class_name, re.IGNORECASE)):
+                    print(f"Removing cookie banner with class: {class_name}")
+                    element.decompose()
+
+            # Try to find elements with specific IDs
+            for id_name in banner_ids:
+                element = soup.find(id=re.compile(id_name, re.IGNORECASE))
+                if element:
+                    print(f"Removing cookie banner with ID: {id_name}")
+                    element.decompose()
+
+            # Try to find elements with cookie-related text in fixed positions
+            # These are often at the top or bottom of the page
+            for tag in ['div', 'section', 'header', 'footer', 'aside']:
+                for element in soup.find_all(tag):
+                    # Check if it's fixed positioned or absolutely positioned at top/bottom
+                    style = element.get('style', '')
+                    position_fixed = 'position:fixed' in style.replace(' ', '') or 'position: fixed' in style
+                    position_absolute = 'position:absolute' in style.replace(' ', '') or 'position: absolute' in style
+                    has_position = position_fixed or position_absolute
+
+                    # Check for top or bottom positioning
+                    at_edge = ('top:0' in style.replace(' ', '') or 'bottom:0' in style.replace(' ', '') or
+                               'top: 0' in style or 'bottom: 0' in style)
+
+                    if has_position and at_edge:
+                        element_text = element.get_text().lower()
+                        for text in banner_texts:
+                            if text in element_text:
+                                print(f"Removing positioned cookie banner containing text: {text}")
+                                element.decompose()
+                                break
+
+            # Add CSS to hide any remaining cookie banners
+            style_tag = soup.new_tag('style')
+            style_tag.string = '''
+            .cookie-banner, .cookie-consent, .cookie-notice, .cookie-popup,
+            .cookie-alert, .cookie-warning, .cookie-message, .cookie-policy,
+            #cookie-banner, #cookie-consent, #cookie-notice, #cookie-popup,
+            #cookie-alert, #cookie-warning, #cookie-message, #cookie-policy,
+            .gdpr-banner, .gdpr-consent, .gdpr-notice, .gdpr-popup,
+            #gdpr-banner, #gdpr-consent, #gdpr-notice, #gdpr-popup,
+            .consent-banner, .consent-popup, .eu-cookie-compliance, .privacy-banner,
+            #consent-banner, #consentPopup, #privacy-banner, #privacyNotice {
+                display: none !important;
+                visibility: hidden !important;
+                height: 0 !important;
+                min-height: 0 !important;
+                max-height: 0 !important;
+                opacity: 0 !important;
+                pointer-events: none !important;
+                transform: scale(0) !important;
+                overflow: hidden !important;
+            }
+            [class*="cookie-"], [class*="gdpr-"], [class*="consent-"],
+            [id*="cookie"], [id*="gdpr"], [id*="consent"] {
+                display: none !important;
+            }
+            '''
+
+            # Add style to head or create head if needed
+            if soup.head:
+                soup.head.append(style_tag)
+            else:
+                head = soup.new_tag('head')
+                head.append(style_tag)
+                soup.insert(0, head)
+
+            return str(soup)
+
+        except Exception as e:
+            print(f"Error removing cookie banners: {e}")
+            return html_content  # Return original if anything fails
+
+    def convert_html_to_pdf(self, html_file, output_path, page_size='A4', js_delay=1000, remove_cookies=False):
+        """Convert HTML file to PDF using Chrome headless mode"""
+        try:
+            # Find Chrome executable
+            chrome_path = self.find_chrome_executable()
+            if not chrome_path:
+                print("Error: Chrome/Chromium not found on your system.")
+                return False
+
+            # If remove_cookies is True, process the HTML to remove cookie banners
+            if remove_cookies:
+                print(f"Removing cookie banners from {html_file}")
+
+                # Create a temporary file to store the processed HTML
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.html', mode='w+',
+                                                 encoding='utf-8') as temp_file:
+                    # Read the original HTML
+                    with open(html_file, 'r', encoding='utf-8', errors='ignore') as f:
+                        html_content = f.read()
+
+                    # Process the HTML to remove cookie banners
+                    processed_html = self.remove_cookie_banners(html_content)
+
+                    # Write the processed HTML to the temporary file
+                    temp_file.write(processed_html)
+                    temp_file_path = temp_file.name
+
+                # Use the temporary file for conversion
+                file_to_convert = temp_file_path
+            else:
+                # Use the original file
+                file_to_convert = html_file
+
+            # Convert file path to URL format
+            absolute_path = os.path.abspath(file_to_convert)
+            file_url = f"file:///{absolute_path.replace(os.sep, '/')}"
+
+            # Set page size dimensions
+            page_width, page_height = "8.5in", "11in"  # Default to Letter
+            if page_size == 'A4':
+                page_width, page_height = "210mm", "297mm"
+            elif page_size == 'A3':
+                page_width, page_height = "297mm", "420mm"
+            elif page_size == 'A5':
+                page_width, page_height = "148mm", "210mm"
+            elif page_size == 'Legal':
+                page_width, page_height = "8.5in", "14in"
+
+            # Set up Chrome command
+            chrome_args = [
+                chrome_path,
+                '--headless',
+                '--disable-gpu',
+                '--no-sandbox',
+                '--disable-web-security',
+                f'--virtual-time-budget={js_delay}',
+                '--run-all-compositor-stages-before-draw',
+                f'--print-to-pdf={output_path}',
+                f'--print-to-pdf-no-header',
+                f'--default-page-size={page_size}',
+                file_url
+            ]
+
+            # Run Chrome with a timeout
+            process = subprocess.Popen(
+                chrome_args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            # Wait for the process to complete (with a timeout)
+            try:
+                stdout, stderr = process.communicate(timeout=60)  # 60-second timeout
+                if process.returncode != 0:
+                    print(f"Chrome error: {stderr.decode()}")
+                    return False
+
+                # Check if PDF was created successfully
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    return True
+                else:
+                    print(f"PDF file was not created or is empty: {output_path}")
+                    return False
+
+            except subprocess.TimeoutExpired:
+                process.kill()
+                print(f"Chrome process timed out after 60 seconds")
+                return False
+            finally:
+                # Clean up temporary file if it was created
+                if remove_cookies and 'temp_file_path' in locals():
+                    try:
+                        os.unlink(temp_file_path)
+                    except:
+                        pass
+
+        except Exception as e:
+            print(f"Error converting {html_file}: {e}")
+            return False
+
+    def start_conversion(self, html_files, output_dir, page_size='A4', js_delay=1000,
+                         remove_cookies=False, progress_callback=None, file_callback=None,
+                         status_callback=None):
+        """Start converting HTML files to PDF"""
+        self.stop_requested = False
+        self.html_files = html_files
+        self.output_dir = output_dir
+        self.current_file = 0
+        self.total_files = len(html_files)
+        self.successful_conversions = 0
+        self.failed_conversions = 0
+
+        try:
+            # Make sure output directory exists
+            os.makedirs(output_dir, exist_ok=True)
+
+            # Test if Chrome is available
+            chrome_path = self.find_chrome_executable()
+            if not chrome_path:
+                status_callback(
+                    f"Error: Chrome/Chromium not found on your system. Please install Chrome, Edge, or Brave browser.")
+                return 0, self.total_files
+
+            # Process each file
+            for html_file in html_files:
+                if self.stop_requested:
+                    status_callback("Conversion stopped by user")
+                    break
+
+                self.current_file += 1
+                file_name = os.path.basename(html_file)
+                file_callback(f"Converting {file_name} ({self.current_file}/{self.total_files})")
+
+                # Update progress
+                if progress_callback:
+                    progress_callback(self.current_file, self.total_files)
+
+                # Set output PDF path
+                output_name = os.path.splitext(file_name)[0] + ".pdf"
+                output_path = os.path.join(output_dir, output_name)
+
+                # Convert HTML to PDF
+                if self.convert_html_to_pdf(html_file, output_path, page_size, js_delay, remove_cookies):
+                    self.successful_conversions += 1
+                    status_callback(
+                        f"Converted: {output_name}" + (" (cookie banners removed)" if remove_cookies else ""))
+                else:
+                    self.failed_conversions += 1
+                    status_callback(f"Failed to convert: {file_name}")
+
+            # Conversion complete
+            status_callback(
+                f"Conversion completed. Successfully converted: {self.successful_conversions}, Failed: {self.failed_conversions}")
+
+        except Exception as e:
+            status_callback(f"Error during conversion: {str(e)}")
+
+        return self.successful_conversions, self.failed_conversions
+
+    def stop_conversion(self):
+        """Signal to stop the conversion process"""
+        self.stop_requested = True
+
+
+class ModernGUI:
+    def __init__(self):
+        # Use customtkinter for modern appearance
+        ctk.set_appearance_mode("System")  # Modes: "System" (default), "Dark", "Light"
+        ctk.set_default_color_theme("blue")  # Themes: "blue" (default), "green", "dark-blue"
+
+        self.root = ctk.CTk()
+        self.root.title("PDF Tools")
+        self.root.geometry("900x700")
+        self.root.minsize(800, 600)
+
+        # Create instances
+        self.converter = ChromeHTMLToPDFConverter()
+        self.pdf_merger = PDFMerger()
+        self.thread = None
+        self.html_files = []
+        self.pdf_files = []
+
+        # Set up the UI components
+        self.setup_ui()
+
+    def setup_ui(self):
+        # Create main frame with padding
+        self.main_frame = ctk.CTkFrame(self.root)
+        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # App title
+        self.title_label = ctk.CTkLabel(
+            self.main_frame,
+            text="PDF Tools (Chrome Edition)",
+            font=ctk.CTkFont(size=24, weight="bold")
+        )
+        self.title_label.pack(pady=(0, 10))
+
+        # Create tab view for different functions
+        self.tabview = ctk.CTkTabview(self.main_frame)
+        self.tabview.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Create tabs
+        self.html_to_pdf_tab = self.tabview.add("HTML to PDF")
+        self.merge_pdf_tab = self.tabview.add("Merge PDFs")
+
+        # Set default tab
+        self.tabview.set("HTML to PDF")
+
+        # Setup HTML to PDF tab UI
+        self.setup_html_to_pdf_ui()
+
+        # Setup Merge PDFs tab UI
+        self.setup_merge_pdfs_ui()
+
+    def setup_html_to_pdf_ui(self):
+        # Input and output selection frame
+        self.io_frame = ctk.CTkFrame(self.html_to_pdf_tab)
+        self.io_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        # Select HTML files button
+        self.select_files_button = ctk.CTkButton(
+            self.io_frame,
+            text="Select HTML Files",
+            command=self.select_html_files,
+            height=38
+        )
+        self.select_files_button.grid(row=0, column=0, padx=(20, 10), pady=20, sticky="w")
+
+        # Selected files label
+        self.files_label = ctk.CTkLabel(self.io_frame, text="No files selected")
+        self.files_label.grid(row=0, column=1, padx=10, pady=20, sticky="w")
+
+        # Output directory selection
+        self.output_dir_label = ctk.CTkLabel(self.io_frame, text="Output Directory:")
+        self.output_dir_label.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="w")
+
+        self.output_dir_var = tk.StringVar(value=os.path.join(os.path.expanduser("~"), "PDFs"))
+
+        output_dir_frame = ctk.CTkFrame(self.io_frame, fg_color="transparent")
+        output_dir_frame.grid(row=1, column=1, padx=10, pady=(0, 20), sticky="ew")
+
+        self.output_dir_entry = ctk.CTkEntry(
+            output_dir_frame,
+            textvariable=self.output_dir_var,
+            width=400
+        )
+        self.output_dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+
+        self.browse_button = ctk.CTkButton(
+            output_dir_frame,
+            text="Browse",
+            command=self.browse_output_dir,
+            width=80
+        )
+        self.browse_button.pack(side=tk.RIGHT)
+
+        self.io_frame.grid_columnconfigure(1, weight=1)
+
+        # Conversion options frame
+        self.options_frame = ctk.CTkFrame(self.html_to_pdf_tab)
+        self.options_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        # Page size option
+        self.page_size_label = ctk.CTkLabel(self.options_frame, text="Page Size:")
+        self.page_size_label.grid(row=0, column=0, padx=20, pady=10, sticky="w")
+
+        self.page_size_var = tk.StringVar(value="A4")
+        self.page_size_combo = ctk.CTkComboBox(
+            self.options_frame,
+            values=["A4", "Letter", "Legal", "A3", "A5"],
+            variable=self.page_size_var,
+            width=120
+        )
+        self.page_size_combo.grid(row=0, column=1, padx=10, pady=10, sticky="w")
+
+        # JavaScript delay option
+        self.js_delay_label = ctk.CTkLabel(self.options_frame, text="JavaScript Delay (ms):")
+        self.js_delay_label.grid(row=0, column=2, padx=(20, 10), pady=10, sticky="w")
+
+        self.js_delay_var = tk.StringVar(value="1000")
+        self.js_delay_entry = ctk.CTkEntry(
+            self.options_frame,
+            textvariable=self.js_delay_var,
+            width=80
+        )
+        self.js_delay_entry.grid(row=0, column=3, padx=10, pady=10, sticky="w")
+
+        # Cookie removal option
+        self.remove_cookies_var = tk.BooleanVar(value=True)
+        self.remove_cookies_checkbox = ctk.CTkCheckBox(
+            self.options_frame,
+            text="Remove Cookie Banners",
+            variable=self.remove_cookies_var
+        )
+        self.remove_cookies_checkbox.grid(row=1, column=0, columnspan=2, padx=20, pady=10, sticky="w")
+
+        # Note about Chrome
+        chrome_path = self.converter.find_chrome_executable()
+        chrome_status = f"Using Chrome at: {chrome_path}" if chrome_path else "Chrome/Edge not found! Please install Chrome, Edge or Brave browser."
+
+        self.note_label = ctk.CTkLabel(
+            self.options_frame,
+            text=chrome_status,
+            font=ctk.CTkFont(size=10, slant="italic")
+        )
+        self.note_label.grid(row=2, column=0, columnspan=4, padx=20, pady=(0, 10), sticky="w")
+
+        # Progress display frame
+        self.html_progress_frame = ctk.CTkFrame(self.html_to_pdf_tab)
+        self.html_progress_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        # Current file progress label
+        self.current_file_label = ctk.CTkLabel(self.html_progress_frame, text="Ready")
+        self.current_file_label.pack(anchor="w", padx=20, pady=(20, 5))
+
+        # Progress bar
+        self.progress_bar = ctk.CTkProgressBar(self.html_progress_frame)
+        self.progress_bar.pack(fill=tk.X, padx=20, pady=5)
+        self.progress_bar.set(0)
+
+        # Progress status label
+        self.status_label = ctk.CTkLabel(self.html_progress_frame, text="")
+        self.status_label.pack(anchor="w", padx=20, pady=(5, 20))
+
+        # Action buttons frame
+        self.html_button_frame = ctk.CTkFrame(self.html_to_pdf_tab, fg_color="transparent")
+        self.html_button_frame.pack(fill=tk.X, padx=10, pady=(20, 10))
+
+        # Convert button
+        self.convert_button = ctk.CTkButton(
+            self.html_button_frame,
+            text="Convert to PDF",
+            command=self.start_conversion,
+            height=40,
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        self.convert_button.pack(side=tk.LEFT, padx=20)
+
+        # Stop button
+        self.stop_button = ctk.CTkButton(
+            self.html_button_frame,
+            text="Stop",
+            command=self.stop_conversion,
+            height=40,
+            state="disabled",
+            fg_color="#E57373",
+            hover_color="#EF5350"
+        )
+        self.stop_button.pack(side=tk.LEFT, padx=10)
+
+        # Log frame
+        self.html_log_frame = ctk.CTkFrame(self.html_to_pdf_tab)
+        self.html_log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        self.html_log_label = ctk.CTkLabel(self.html_log_frame, text="Conversion Log:")
+        self.html_log_label.pack(anchor="w", padx=20, pady=(10, 5))
+
+        # Log text area
+        self.log_text = ctk.CTkTextbox(self.html_log_frame, height=150)
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
+
+    def setup_merge_pdfs_ui(self):
+        # Input and output selection frame
+        self.merge_io_frame = ctk.CTkFrame(self.merge_pdf_tab)
+        self.merge_io_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        # Select PDF files button
+        self.select_pdfs_button = ctk.CTkButton(
+            self.merge_io_frame,
+            text="Select PDF Files",
+            command=self.select_pdf_files,
+            height=38
+        )
+        self.select_pdfs_button.grid(row=0, column=0, padx=(20, 10), pady=20, sticky="w")
+
+        # Selected files label
+        self.pdfs_label = ctk.CTkLabel(self.merge_io_frame, text="No PDF files selected")
+        self.pdfs_label.grid(row=0, column=1, padx=10, pady=20, sticky="w")
+
+        # Output file selection
+        self.output_file_label = ctk.CTkLabel(self.merge_io_frame, text="Output Filename:")
+        self.output_file_label.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="w")
+
+        self.output_file_var = tk.StringVar(value=os.path.join(os.path.expanduser("~"), "merged.pdf"))
+
+        output_file_frame = ctk.CTkFrame(self.merge_io_frame, fg_color="transparent")
+        output_file_frame.grid(row=1, column=1, padx=10, pady=(0, 20), sticky="ew")
+
+        self.output_file_entry = ctk.CTkEntry(
+            output_file_frame,
+            textvariable=self.output_file_var,
+            width=400
+        )
+        self.output_file_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+
+        self.browse_output_file_button = ctk.CTkButton(
+            output_file_frame,
+            text="Browse",
+            command=self.browse_output_file,
+            width=80
+        )
+        self.browse_output_file_button.pack(side=tk.RIGHT)
+
+        self.merge_io_frame.grid_columnconfigure(1, weight=1)
+
+        # File reordering frame
+        self.reorder_frame = ctk.CTkFrame(self.merge_pdf_tab)
+        self.reorder_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        self.reorder_label = ctk.CTkLabel(self.reorder_frame, text="PDF Files (drag to reorder):")
+        self.reorder_label.pack(anchor="w", padx=20, pady=(10, 5))
+
+        # PDF files listbox (custom implementation for reordering)
+        self.pdf_listbox_frame = ctk.CTkFrame(self.reorder_frame)
+        self.pdf_listbox_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=5)
+
+        self.pdf_listbox = tk.Listbox(
+            self.pdf_listbox_frame,
+            selectmode=tk.SINGLE,
+            background="#f0f0f0",
+            font=("Segoe UI", 11)
+        )
+        self.pdf_listbox.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+
+        # Scrollbar for PDF listbox
+        self.pdf_scrollbar = ctk.CTkScrollbar(self.pdf_listbox_frame, command=self.pdf_listbox.yview)
+        self.pdf_scrollbar.pack(fill=tk.Y, side=tk.RIGHT)
+        self.pdf_listbox.config(yscrollcommand=self.pdf_scrollbar.set)
+
+        # Buttons for reordering
+        self.reorder_buttons_frame = ctk.CTkFrame(self.reorder_frame, fg_color="transparent")
+        self.reorder_buttons_frame.pack(fill=tk.X, padx=20, pady=5)
+
+        self.move_up_button = ctk.CTkButton(
+            self.reorder_buttons_frame,
+            text="Move Up",
+            command=self.move_pdf_up,
+            width=100
+        )
+        self.move_up_button.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.move_down_button = ctk.CTkButton(
+            self.reorder_buttons_frame,
+            text="Move Down",
+            command=self.move_pdf_down,
+            width=100
+        )
+        self.move_down_button.pack(side=tk.LEFT, padx=10)
+
+        self.remove_pdf_button = ctk.CTkButton(
+            self.reorder_buttons_frame,
+            text="Remove",
+            command=self.remove_pdf,
+            width=100,
+            fg_color="#E57373",
+            hover_color="#EF5350"
+        )
+        self.remove_pdf_button.pack(side=tk.LEFT, padx=10)
+
+        # Progress display frame
+        self.merge_progress_frame = ctk.CTkFrame(self.merge_pdf_tab)
+        self.merge_progress_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        # Current file progress label
+        self.merge_file_label = ctk.CTkLabel(self.merge_progress_frame, text="Ready")
+        self.merge_file_label.pack(anchor="w", padx=20, pady=(20, 5))
+
+        # Progress bar
+        self.merge_progress_bar = ctk.CTkProgressBar(self.merge_progress_frame)
+        self.merge_progress_bar.pack(fill=tk.X, padx=20, pady=5)
+        self.merge_progress_bar.set(0)
+
+        # Progress status label
+        self.merge_status_label = ctk.CTkLabel(self.merge_progress_frame, text="")
+        self.merge_status_label.pack(anchor="w", padx=20, pady=(5, 20))
+
+        # Action buttons frame
+        self.merge_button_frame = ctk.CTkFrame(self.merge_pdf_tab, fg_color="transparent")
+        self.merge_button_frame.pack(fill=tk.X, padx=10, pady=(20, 10))
+
+        # Merge button
+        self.merge_button = ctk.CTkButton(
+            self.merge_button_frame,
+            text="Merge PDFs",
+            command=self.start_merge,
+            height=40,
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        self.merge_button.pack(side=tk.LEFT, padx=20)
+
+        # Stop merge button
+        self.stop_merge_button = ctk.CTkButton(
+            self.merge_button_frame,
+            text="Stop",
+            command=self.stop_merge,
+            height=40,
+            state="disabled",
+            fg_color="#E57373",
+            hover_color="#EF5350"
+        )
+        self.stop_merge_button.pack(side=tk.LEFT, padx=10)
+
+    def select_html_files(self):
+        """Open file dialog to select multiple HTML files"""
+        filetypes = [("HTML files", "*.html;*.htm"), ("All files", "*.*")]
+        files = filedialog.askopenfilenames(filetypes=filetypes, title="Select HTML Files")
+
+        if files:
+            self.html_files = list(files)
+            num_files = len(self.html_files)
+            self.files_label.configure(text=f"{num_files} file{'s' if num_files > 1 else ''} selected")
+
+            self.log_text.delete("1.0", tk.END)
+            self.log_text.insert("1.0", "Selected files:\n\n")
+
+            for file in self.html_files:
+                self.log_text.insert(tk.END, f"• {os.path.basename(file)}\n")
+
+    def select_pdf_files(self):
+        """Open file dialog to select multiple PDF files"""
+        filetypes = [("PDF files", "*.pdf"), ("All files", "*.*")]
+        files = filedialog.askopenfilenames(filetypes=filetypes, title="Select PDF Files")
+
+        if files:
+            self.pdf_files = list(files)
+            num_files = len(self.pdf_files)
+            self.pdfs_label.configure(text=f"{num_files} file{'s' if num_files > 1 else ''} selected")
+
+            # Clear and update PDF listbox
+            self.pdf_listbox.delete(0, tk.END)
+            for file in self.pdf_files:
+                self.pdf_listbox.insert(tk.END, os.path.basename(file))
+
+    def move_pdf_up(self):
+        """Move the selected PDF file up in the list"""
+        selected_idx = self.pdf_listbox.curselection()
+        if not selected_idx:
+            return
+
+        idx = int(selected_idx[0])
+        if idx == 0:
+            return  # Already at the top
+
+        # Swap in the listbox display
+        text = self.pdf_listbox.get(idx)
+        self.pdf_listbox.delete(idx)
+        self.pdf_listbox.insert(idx - 1, text)
+        self.pdf_listbox.selection_set(idx - 1)
+
+        # Swap in the actual file list
+        self.pdf_files[idx], self.pdf_files[idx - 1] = self.pdf_files[idx - 1], self.pdf_files[idx]
+
+    def move_pdf_down(self):
+        """Move the selected PDF file down in the list"""
+        selected_idx = self.pdf_listbox.curselection()
+        if not selected_idx:
+            return
+
+        idx = int(selected_idx[0])
+        if idx == len(self.pdf_files) - 1:
+            return  # Already at the bottom
+
+        # Swap in the listbox display
+        text = self.pdf_listbox.get(idx)
+        self.pdf_listbox.delete(idx)
+        self.pdf_listbox.insert(idx + 1, text)
+        self.pdf_listbox.selection_set(idx + 1)
+
+        # Swap in the actual file list
+        self.pdf_files[idx], self.pdf_files[idx + 1] = self.pdf_files[idx + 1], self.pdf_files[idx]
+
+    def remove_pdf(self):
+        """Remove the selected PDF file from the list"""
+        selected_idx = self.pdf_listbox.curselection()
+        if not selected_idx:
+            return
+
+        idx = int(selected_idx[0])
+
+        # Remove from the listbox display
+        self.pdf_listbox.delete(idx)
+
+        # Remove from the actual file list
+        self.pdf_files.pop(idx)
+
+        # Update the label
+        num_files = len(self.pdf_files)
+        self.pdfs_label.configure(text=f"{num_files} file{'s' if num_files > 1 else ''} selected")
+
+    def browse_output_dir(self):
+        """Open directory dialog to select output directory"""
+        dir_path = filedialog.askdirectory(initialdir=self.output_dir_var.get())
+        if dir_path:
+            self.output_dir_var.set(dir_path)
+
+    def browse_output_file(self):
+        """Open file dialog to select output PDF file"""
+        filetypes = [("PDF files", "*.pdf")]
+        output_file = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=filetypes,
+            initialdir=os.path.dirname(self.output_file_var.get()),
+            initialfile=os.path.basename(self.output_file_var.get())
+        )
+        if output_file:
+            self.output_file_var.set(output_file)
+
+    def update_progress(self, current, total):
+        """Update progress bar and text"""
+        if total > 0:
+            self.progress_bar.set(current / total)
+        else:
+            self.progress_bar.set(0)
+
+    def update_merge_progress(self, current, total):
+        """Update merge progress bar and text"""
+        if total > 0:
+            self.merge_progress_bar.set(current / total)
+        else:
+            self.merge_progress_bar.set(0)
+
+    def update_file_status(self, message):
+        """Update current file status label"""
+        self.current_file_label.configure(text=message)
+        self.root.update_idletasks()
+
+    def update_merge_file_status(self, message):
+        """Update current merge file status label"""
+        self.merge_file_label.configure(text=message)
+        self.root.update_idletasks()
+
+    def update_status(self, message):
+        """Add a message to the status log"""
+        self.status_label.configure(text=message)
+        self.log_text.insert(tk.END, f"{message}\n")
+        self.log_text.see(tk.END)
+        self.root.update_idletasks()
+
+    def update_merge_status(self, message):
+        """Add a message to the merge status log"""
+        self.merge_status_label.configure(text=message)
+        self.root.update_idletasks()
+
+    def start_conversion(self):
+        """Start the HTML to PDF conversion process"""
+        # Check if Chrome is available
+        chrome_path = self.converter.find_chrome_executable()
+        if not chrome_path:
+            messagebox.showerror(
+                "Chrome Not Found",
+                "Chrome, Edge, or Brave browser is required but not found on your system. Please install one of these browsers."
+            )
+            return
+
+        # Validate input
+        if not self.html_files:
+            messagebox.showerror("Error", "Please select HTML files to convert.")
+            return
+
+        output_dir = self.output_dir_var.get().strip()
+        if not output_dir:
+            messagebox.showerror("Error", "Please select an output directory.")
+            return
+
+        # Get page size and JavaScript delay
+        page_size = self.page_size_var.get()
+        remove_cookies = self.remove_cookies_var.get()
+
+        try:
+            js_delay = int(self.js_delay_var.get())
+        except ValueError:
+            js_delay = 1000  # Default if invalid
+
+        # Disable convert button, enable stop button
+        self.convert_button.configure(state="disabled")
+        self.stop_button.configure(state="normal")
+
+        # Reset progress
+        self.progress_bar.set(0)
+        self.update_file_status("Starting conversion...")
+        self.update_status(
+            f"Starting HTML to PDF conversion process with Chrome{' (cookie banners will be removed)' if remove_cookies else ''}...")
+
+        # Start conversion in a separate thread
+        self.thread = threading.Thread(
+            target=self.converter.start_conversion,
+            args=(self.html_files, output_dir),
+            kwargs={
+                'page_size': page_size,
+                'js_delay': js_delay,
+                'remove_cookies': remove_cookies,
+                'progress_callback': self.update_progress,
+                'file_callback': self.update_file_status,
+                'status_callback': self.update_status
+            }
+        )
+        self.thread.daemon = True
+        self.thread.start()
+
+        # Schedule periodic check to re-enable button when thread completes
+        self.root.after(1000, self.check_thread)
+
+    def start_merge(self):
+        """Start the PDF merging process"""
+        # Validate input
+        if not self.pdf_files:
+            messagebox.showerror("Error", "Please select PDF files to merge.")
+            return
+
+        output_file = self.output_file_var.get().strip()
+        if not output_file:
+            messagebox.showerror("Error", "Please specify an output filename.")
+            return
+
+        # Make sure output file has .pdf extension
+        if not output_file.lower().endswith('.pdf'):
+            output_file += '.pdf'
+            self.output_file_var.set(output_file)
+
+        # Create output directory if it doesn't exist
+        output_dir = os.path.dirname(output_file)
+        if output_dir and not os.path.exists(output_dir):
+            try:
+                os.makedirs(output_dir)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to create output directory: {str(e)}")
+                return
+
+        # Disable merge button, enable stop button
+        self.merge_button.configure(state="disabled")
+        self.stop_merge_button.configure(state="normal")
+
+        # Reset progress
+        self.merge_progress_bar.set(0)
+        self.update_merge_file_status("Starting merge...")
+        self.update_merge_status("Starting PDF merge process...")
+
+        # Start merging in a separate thread
+        self.thread = threading.Thread(
+            target=self.pdf_merger.merge_pdfs,
+            args=(self.pdf_files, output_file),
+            kwargs={
+                'progress_callback': self.update_merge_progress,
+                'file_callback': self.update_merge_file_status,
+                'status_callback': self.update_merge_status
+            }
+        )
+        self.thread.daemon = True
+        self.thread.start()
+
+        # Schedule periodic check to re-enable button when thread completes
+        self.root.after(1000, self.check_merge_thread)
+
+    def stop_conversion(self):
+        """Stop the conversion process"""
+        if self.converter:
+            self.converter.stop_conversion()
+        self.stop_button.configure(state="disabled")
+
+    def stop_merge(self):
+        """Stop the merge process"""
+        if self.pdf_merger:
+            self.pdf_merger.stop_merging()
+        self.stop_merge_button.configure(state="disabled")
+
+    def check_thread(self):
+        """Check if the conversion thread has completed"""
+        if self.thread and not self.thread.is_alive():
+            self.convert_button.configure(state="normal")
+            self.stop_button.configure(state="disabled")
+
+            # Show completion message
+            successful = self.converter.successful_conversions
+            failed = self.converter.failed_conversions
+
+            if successful > 0 and failed == 0:
+                messagebox.showinfo(
+                    "Conversion Complete",
+                    f"Successfully converted all {successful} files to PDF."
+                )
+            elif successful > 0 and failed > 0:
+                messagebox.showinfo(
+                    "Conversion Complete",
+                    f"Converted {successful} files. {failed} files failed to convert. Check the log for details."
+                )
+            elif successful == 0 and failed > 0:
+                messagebox.showerror(
+                    "Conversion Failed",
+                    f"Failed to convert any files. Check the log for details."
+                )
+        else:
+            self.root.after(1000, self.check_thread)
+
+    def check_merge_thread(self):
+        """Check if the merge thread has completed"""
+        if self.thread and not self.thread.is_alive():
+            self.merge_button.configure(state="normal")
+            self.stop_merge_button.configure(state="disabled")
+
+            # Check if output file exists
+            output_file = self.output_file_var.get()
+            if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+                messagebox.showinfo(
+                    "Merge Complete",
+                    f"Successfully merged PDFs into: {os.path.basename(output_file)}"
+                )
+                # Ask if user wants to open the file
+                if messagebox.askyesno("Open File", "Would you like to open the merged PDF?"):
+                    try:
+                        import subprocess
+                        if sys.platform == 'win32':
+                            os.startfile(output_file)
+                        elif sys.platform == 'darwin':  # macOS
+                            subprocess.call(('open', output_file))
+                        else:  # Linux
+                            subprocess.call(('xdg-open', output_file))
+                    except Exception as e:
+                        messagebox.showerror("Error", f"Failed to open file: {str(e)}")
+            else:
+                messagebox.showerror(
+                    "Merge Failed",
+                    f"Failed to create merged PDF file."
+                )
+        else:
+            self.root.after(1000, self.check_merge_thread)
+
+
+if __name__ == "__main__":
+    app = ModernGUI()
+    app.root.mainloop()
