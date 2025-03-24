@@ -1,0 +1,565 @@
+import requests
+import json
+import csv
+import time
+import os
+import tempfile
+from datetime import datetime
+from urllib.parse import urlparse, parse_qs, quote
+
+# Configuration
+FLARESOLVERR_URL = "http://localhost:8191/v1"  # Adjust if FlareSolverr is running elsewhere
+LEXOLOGY_BASE_URL = "https://www.lexology.com"
+SEARCH_URL = "https://www.lexology.com/search/?q=&j=&w=9&f=&from=31%2F08%2F2024&to=23%2F03%2F2025&j=178"
+
+# Create output directory
+pdf_dir = "lexology_pdfs"
+os.makedirs(pdf_dir, exist_ok=True)
+
+
+def create_flaresolverr_session():
+    """Create a new FlareSolverr session"""
+    payload = {
+        "cmd": "sessions.create"
+    }
+
+    response = requests.post(FLARESOLVERR_URL, json=payload)
+    data = response.json()
+
+    if data["status"] == "ok":
+        print(f"Created FlareSolverr session: {data['session']}")
+        return data["session"]
+    else:
+        raise Exception(f"Failed to create FlareSolverr session: {data['message']}")
+
+
+def login_to_lexology(session_id):
+    """Login to Lexology using FlareSolverr session"""
+    print("Attempting to log in to Lexology...")
+
+    # First visit the main site to get cookies
+    get_url_with_flaresolverr(LEXOLOGY_BASE_URL, session_id)
+    time.sleep(1)
+
+    # Now visit the login page to get the form structure
+    login_url = "https://www.lexology.com/account/login"
+    login_page_solution = get_url_with_flaresolverr(login_url, session_id)
+
+    if not login_page_solution:
+        print("Failed to load login page")
+        return False
+
+    # Save the login page for debugging
+    with open("login_page.html", "w", encoding="utf-8") as f:
+        f.write(login_page_solution["response"])
+
+    # Extract form details and CSRF token if present
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(login_page_solution["response"], 'html.parser')
+
+    # Find the login form
+    login_form = soup.find('form', {'id': 'LogInForm'})
+    if not login_form:
+        print("Warning: Could not find login form with id 'LogInForm'")
+        login_form = soup.find('form', {'action': '/Account/Login'})
+
+    if not login_form:
+        print("Error: Could not find login form")
+        return False
+
+    # Get the form action URL
+    form_action = login_form.get('action', '')
+    if form_action:
+        if not form_action.startswith('http'):
+            if form_action.startswith('/'):
+                form_action = f"{LEXOLOGY_BASE_URL}{form_action}"
+            else:
+                form_action = f"{LEXOLOGY_BASE_URL}/{form_action}"
+    else:
+        form_action = login_url
+
+    print(f"Form action URL: {form_action}")
+
+    # Check for CSRF token or other hidden inputs
+    hidden_inputs = {}
+    for hidden in login_form.find_all('input', {'type': 'hidden'}):
+        if hidden.has_attr('name') and hidden.has_attr('value'):
+            hidden_inputs[hidden['name']] = hidden['value']
+
+    # Get user credentials
+    email = input("Enter your Lexology email address: ")
+    password = input("Enter your Lexology password: ")
+
+    # Build the post data
+    post_data = f"EmailAddress={quote(email)}&Password={quote(password)}&Submit=Login"
+
+    # Add any hidden fields
+    for name, value in hidden_inputs.items():
+        post_data += f"&{name}={quote(value)}"
+
+    print(f"Submitting login form...")
+
+    # Submit the login form
+    login_payload = {
+        "cmd": "request.post",
+        "url": form_action,
+        "session": session_id,
+        "postData": post_data,
+        "maxTimeout": 60000
+    }
+
+    login_response = requests.post(FLARESOLVERR_URL, json=login_payload)
+    login_data = login_response.json()
+
+    if login_data["status"] == "ok":
+        # Save response for debugging
+        with open("login_response.html", "w", encoding="utf-8") as f:
+            f.write(login_data["solution"]["response"])
+
+        print(f"Form submitted successfully. Landed on: {login_data['solution']['url']}")
+
+        # Verify login success by checking if we're redirected to the account page
+        # or by testing access to a restricted article
+        test_article_url = "https://www.lexology.com/library/detail.aspx?g=88f7bf3f-94e2-4813-9cec-bc49bd9228fd"
+        test_solution = get_url_with_flaresolverr(test_article_url, session_id)
+
+        if test_solution:
+            # Check if login wall is present
+            if "Log in or register" not in test_solution["response"] and "Please login" not in test_solution[
+                "response"]:
+                print("Login successful! Can access protected content.")
+                return True
+            else:
+                print("Login appears to have failed - still seeing login wall")
+                with open("test_article_after_login.html", "w", encoding="utf-8") as f:
+                    f.write(test_solution["response"])
+                return False
+    else:
+        print(f"Login request failed: {login_data.get('message')}")
+        return False
+
+
+def destroy_flaresolverr_session(session_id):
+    """Destroy a FlareSolverr session"""
+    if not session_id:
+        print("No session ID provided, nothing to destroy")
+        return
+
+    payload = {
+        "cmd": "sessions.destroy",
+        "session": session_id
+    }
+
+    response = requests.post(FLARESOLVERR_URL, json=payload)
+    data = response.json()
+
+    if data["status"] == "ok":
+        print(f"Destroyed FlareSolverr session: {session_id}")
+    else:
+        print(f"Warning: Failed to destroy session: {data['message']}")
+
+
+def get_url_with_flaresolverr(url, session_id=None):
+    """Make a request to a URL using FlareSolverr"""
+    payload = {
+        "cmd": "request.get",
+        "url": url,
+        "maxTimeout": 60000
+    }
+
+    if session_id:
+        payload["session"] = session_id
+
+    print(f"Requesting {url} through FlareSolverr...")
+    response = requests.post(FLARESOLVERR_URL, json=payload)
+
+    try:
+        data = response.json()
+        if data["status"] == "ok":
+            return data["solution"]
+        else:
+            print(f"FlareSolverr error: {data['message']}")
+            return None
+    except Exception as e:
+        print(f"Error parsing FlareSolverr response: {e}")
+        return None
+
+
+def is_login_required(html_content):
+    """Check if the page requires login"""
+    login_indicators = [
+        "Please log in to view this article",
+        "You must login to read this article",
+        "Log in or register",
+        "Please login",
+        "To access the Lexology website, you must either log in or"
+    ]
+
+    for indicator in login_indicators:
+        if indicator in html_content:
+            return True
+
+    return False
+
+
+def extract_articles_from_html(html_content):
+    """Extract article links from search results HTML"""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html_content, 'html.parser')
+    articles = []
+
+    # Look for article containers
+    article_elements = soup.select("article") or soup.select(".results-container article") or soup.select(
+        ".article-list article")
+
+    if not article_elements:
+        # Try to find article links if no article containers found
+        article_links = soup.select("a[href*='/library/detail.aspx']") or soup.select("a.article")
+
+        for link in article_links:
+            url = link.get("href")
+            if url and not url.startswith(("http://", "https://")):
+                url = f"{LEXOLOGY_BASE_URL}{url}"
+
+            title = link.get_text().strip()
+            if not title and link.select_one("h3"):
+                title = link.select_one("h3").get_text().strip()
+
+            articles.append({
+                "title": title or "Unknown title",
+                "url": url
+            })
+    else:
+        for article in article_elements:
+            # Extract title and URL
+            title_element = article.select_one("h3 a") or article.select_one("h2 a") or article.select_one(".title a")
+
+            if title_element:
+                title = title_element.get_text().strip()
+                url = title_element.get("href")
+
+                if url and not url.startswith(("http://", "https://")):
+                    url = f"{LEXOLOGY_BASE_URL}{url}"
+
+                # Extract firm/publisher
+                firm = "Unknown"
+                for selector in [".firm-name", ".author-firm", ".publisher"]:
+                    firm_element = article.select_one(selector)
+                    if firm_element:
+                        firm = firm_element.get_text().strip()
+                        break
+
+                # Extract date
+                date = "Unknown"
+                for selector in [".date", ".published-date", "time"]:
+                    date_element = article.select_one(selector)
+                    if date_element:
+                        date = date_element.get_text().strip()
+                        break
+
+                articles.append({
+                    "title": title,
+                    "url": url,
+                    "firm": firm,
+                    "date": date
+                })
+
+    print(f"Found {len(articles)} articles on page")
+    return articles
+
+
+def extract_next_page_url(html_content, current_url):
+    """Extract next page URL from search results HTML"""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html_content, 'html.parser')
+    next_link = soup.select_one("a.next-page") or soup.select_one("a.next")
+
+    if next_link and not next_link.get("disabled"):
+        next_url = next_link.get("href")
+        if next_url and not next_url.startswith(("http://", "https://")):
+            # Handle relative URLs
+            parsed_current = urlparse(current_url)
+            base_url = f"{parsed_current.scheme}://{parsed_current.netloc}"
+            next_url = f"{base_url}{next_url}"
+        return next_url
+
+    return None
+
+
+def extract_metadata_from_article(html_content):
+    """Extract metadata from article page HTML"""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html_content, 'html.parser')
+
+    # Extract title
+    title = "Unknown Title"
+    title_element = soup.select_one("h1")
+    if title_element:
+        title = title_element.get_text().strip()
+
+    # Extract firm
+    firm = "Unknown"
+    for selector in [".firm-name", ".author-firm", ".publisher"]:
+        firm_element = soup.select_one(selector)
+        if firm_element:
+            firm = firm_element.get_text().strip()
+            break
+
+    # Extract date
+    date = "Unknown"
+    for selector in [".date", ".published-date", "time"]:
+        date_element = soup.select_one(selector)
+        if date_element:
+            date = date_element.get_text().strip()
+            break
+
+    return {
+        "title": title,
+        "firm": firm,
+        "date": date
+    }
+
+
+def html_to_pdf_playwright(html_content, output_path):
+    """Convert HTML to PDF using Playwright (much faster than wkhtmltopdf)"""
+    try:
+        from playwright.sync_api import sync_playwright
+
+        # Create a temporary HTML file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.html', mode='w', encoding='utf-8') as f:
+            temp_html_path = f.name
+            f.write(html_content)
+
+        with sync_playwright() as p:
+            # Launch a headless Chromium browser
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            # Load the HTML content from the temp file using file:// protocol
+            page.goto(f'file://{temp_html_path}', wait_until="networkidle")
+
+            # Generate PDF
+            page.pdf(path=output_path, format='A4')
+
+            browser.close()
+
+        # Delete the temporary file
+        os.unlink(temp_html_path)
+
+        print(f"Successfully generated PDF using Playwright: {output_path}")
+        return True
+    except Exception as e:
+        print(f"Error generating PDF with Playwright: {e}")
+        # Fall back to saving HTML
+        with open(output_path.replace('.pdf', '.html'), 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        print(f"Saved HTML instead: {output_path.replace('.pdf', '.html')}")
+        return False
+
+
+def save_as_html(html_content, title, article, suffix=""):
+    """Helper function to save HTML content"""
+    safe_title = "".join(c if c.isalnum() else "_" for c in title)
+    safe_title = safe_title[:100]  # Limit filename length
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    firm = article.get('firm', 'Unknown').replace(' ', '_')
+    html_filename = f"{timestamp}_{safe_title}_{firm}{suffix}.html"
+    html_path = os.path.join(pdf_dir, html_filename)
+
+    with open(html_path, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+
+    print(f"Saved HTML: {html_filename}")
+    article["html_filename"] = html_filename
+    return html_filename
+
+
+def scrape_lexology_articles():
+    """Main function to scrape Lexology articles"""
+    # Create a FlareSolverr session
+    session_id = None
+    try:
+        session_id = create_flaresolverr_session()
+
+        # Try to login if you have credentials
+        login_successful = False
+        try_login = input("Do you want to login to Lexology to access more articles? (y/n): ").strip().lower()
+        if try_login == 'y':
+            login_successful = login_to_lexology(session_id)
+
+        # Initialize list to store article data
+        articles = []
+        current_url = SEARCH_URL
+        page_number = 1
+
+        # Process each page of search results
+        while current_url:
+            print(f"Processing page {page_number}...")
+
+            # Get the search results page
+            solution = get_url_with_flaresolverr(current_url, session_id)
+            if not solution:
+                print(f"Failed to get page {page_number}, stopping")
+                break
+
+            # Check if we hit a login page or access restriction
+            if is_login_required(solution["response"]):
+                if not login_successful and try_login != 'y':
+                    print("Hit login requirement. Trying to login now...")
+                    try_login = 'y'
+                    login_successful = login_to_lexology(session_id)
+                    if login_successful:
+                        # Try the page again after login
+                        solution = get_url_with_flaresolverr(current_url, session_id)
+                    else:
+                        print("Login failed or not attempted. Limited to free articles only.")
+
+            # Extract articles from the page
+            page_articles = extract_articles_from_html(solution["response"])
+
+            # Debug - print found articles with their properties
+            print("Articles found on this page:")
+            for idx, art in enumerate(page_articles):
+                print(f"  Article {idx + 1}: {art.get('title', 'No title')} - Properties: {', '.join(art.keys())}")
+
+            # Process each article
+            for article in page_articles:
+                if not article.get("url"):
+                    continue
+
+                title = article.get('title', 'Unknown title')
+                url = article.get('url')
+
+                print(f"Processing article: {title}")
+
+                # Get the article page
+                article_solution = get_url_with_flaresolverr(url, session_id)
+                if not article_solution:
+                    print(f"Failed to get article, skipping")
+                    continue
+
+                # Check if we hit a login page
+                if is_login_required(article_solution["response"]):
+                    # Try to login again if session expired
+                    if login_successful:
+                        print("Session appears to have expired. Trying to login again...")
+                        login_successful = login_to_lexology(session_id)
+                        if login_successful:
+                            # Try the article again after login
+                            article_solution = get_url_with_flaresolverr(url, session_id)
+                            # Check if still hitting login wall
+                            if is_login_required(article_solution["response"]):
+                                print("Still hitting login wall after re-login. Saving as login required.")
+                                save_as_html(article_solution["response"], title, article, "_LOGIN_REQUIRED")
+                                continue
+                        else:
+                            print("Re-login failed. Saving as login required.")
+                            save_as_html(article_solution["response"], title, article, "_LOGIN_REQUIRED")
+                            continue
+                    else:
+                        print("Login required for this article. Saving login page as HTML.")
+                        save_as_html(article_solution["response"], title, article, "_LOGIN_REQUIRED")
+                        continue
+
+                # Extract full metadata from article page if needed
+                if article.get("firm") == "Unknown" or article.get("date") == "Unknown":
+                    metadata = extract_metadata_from_article(article_solution["response"])
+                    article["firm"] = metadata["firm"] if article.get("firm") == "Unknown" else article["firm"]
+                    article["date"] = metadata["date"] if article.get("date") == "Unknown" else article["date"]
+
+                # Generate safe filename
+                safe_title = "".join(c if c.isalnum() else "_" for c in title)
+                safe_title = safe_title[:100]  # Limit filename length
+
+                # Ask if user wants to save as PDF (to speed up if just wanting HTML)
+                save_as_pdf = input(f"Save '{title}' as PDF? (y/n, default: y): ").strip().lower() != 'n'
+
+                if save_as_pdf:
+                    # Generate PDF filename
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    # Handle case where firm info might be missing
+                    firm = article.get('firm', 'Unknown').replace(' ', '_')
+                    pdf_filename = f"{timestamp}_{safe_title}_{firm}.pdf"
+                    pdf_path = os.path.join(pdf_dir, pdf_filename)
+
+                    # Save the article as PDF using Playwright
+                    if html_to_pdf_playwright(article_solution["response"], pdf_path):
+                        print(f"Saved PDF: {pdf_filename}")
+                        article["pdf_filename"] = pdf_filename
+                    else:
+                        print(f"Failed to save PDF, saved as HTML instead")
+                        article["html_filename"] = pdf_filename.replace('.pdf', '.html')
+                else:
+                    # Save as HTML only
+                    save_as_html(article_solution["response"], title, article)
+
+                # Add article data to list
+                articles.append(article)
+
+            # Get the next page URL
+            next_page_url = extract_next_page_url(solution["response"], current_url)
+            if next_page_url and next_page_url != current_url:
+                continue_next = input(f"Continue to next page? (y/n, default: y): ").strip().lower() != 'n'
+                if continue_next:
+                    current_url = next_page_url
+                    page_number += 1
+                else:
+                    current_url = None
+            else:
+                current_url = None
+
+        # Save index to CSV
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"lexology_articles_index_{timestamp}.csv"
+
+        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+            fieldnames = ["title", "url", "firm", "date", "pdf_filename", "html_filename"]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
+
+            writer.writeheader()
+            for article_item in articles:
+                writer.writerow(article_item)
+
+        print(f"Scraping completed. Saved {len(articles)} articles in the '{pdf_dir}' directory")
+        print(f"Article index saved to {filename}")
+
+    finally:
+        # Always destroy the session when done
+        try:
+            if session_id:
+                destroy_flaresolverr_session(session_id)
+        except Exception as e:
+            print(f"Warning: Failed to destroy session: {e}")
+
+
+if __name__ == "__main__":
+    # Check if FlareSolverr is running
+    try:
+        response = requests.post(FLARESOLVERR_URL, json={"cmd": "sessions.list"})
+        response.raise_for_status()
+        print("FlareSolverr is running")
+    except Exception as e:
+        print(f"Error: FlareSolverr is not running or not accessible at {FLARESOLVERR_URL}")
+        print("Please make sure FlareSolverr is installed and running before using this script")
+        print("Installation instructions: https://github.com/FlareSolverr/FlareSolverr")
+        exit(1)
+
+    # Install Playwright if not already installed
+    try:
+        from playwright.sync_api import sync_playwright
+
+        print("Playwright is already installed.")
+    except ImportError:
+        print("Playwright is not installed. Installing now...")
+        import subprocess
+
+        subprocess.check_call(["pip", "install", "playwright"])
+        subprocess.check_call(["playwright", "install", "chromium"])
+        print("Playwright installed successfully.")
+
+    # Start scraping
+    scrape_lexology_articles()
