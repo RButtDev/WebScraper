@@ -1,565 +1,1036 @@
+import tkinter as tk
+from tkinter import ttk, scrolledtext, filedialog, messagebox
+import threading
+import os
+import sys
 import requests
 import json
 import csv
 import time
-import os
 import tempfile
+import shutil
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs, quote
+
+# Ensure required packages are installed
+try:
+    from bs4 import BeautifulSoup
+    import pdfkit
+except ImportError:
+    import subprocess
+
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "beautifulsoup4", "pdfkit"])
+    from bs4 import BeautifulSoup
+    import pdfkit
 
 # Configuration
 FLARESOLVERR_URL = "http://localhost:8191/v1"  # Adjust if FlareSolverr is running elsewhere
 LEXOLOGY_BASE_URL = "https://www.lexology.com"
-SEARCH_URL = "https://www.lexology.com/search/?q=&j=&w=9&f=&from=31%2F08%2F2024&to=23%2F03%2F2025&j=178"
-
-# Create output directory
-pdf_dir = "lexology_pdfs"
-os.makedirs(pdf_dir, exist_ok=True)
+DEFAULT_SEARCH_URL = "https://www.lexology.com/search/?q=&j=&w=9&f=&from=31%2F08%2F2024&to=23%2F03%2F2025&j=178"
 
 
-def create_flaresolverr_session():
-    """Create a new FlareSolverr session"""
-    payload = {
-        "cmd": "sessions.create"
-    }
+class LogRedirector:
+    def __init__(self, text_widget):
+        self.text_widget = text_widget
+        self.buffer = ""
 
-    response = requests.post(FLARESOLVERR_URL, json=payload)
-    data = response.json()
+    def write(self, string):
+        self.buffer += string
+        self.text_widget.configure(state="normal")
+        self.text_widget.insert(tk.END, string)
+        self.text_widget.see(tk.END)
+        self.text_widget.configure(state="disabled")
 
-    if data["status"] == "ok":
-        print(f"Created FlareSolverr session: {data['session']}")
-        return data["session"]
-    else:
-        raise Exception(f"Failed to create FlareSolverr session: {data['message']}")
-
-
-def login_to_lexology(session_id):
-    """Login to Lexology using FlareSolverr session"""
-    print("Attempting to log in to Lexology...")
-
-    # First visit the main site to get cookies
-    get_url_with_flaresolverr(LEXOLOGY_BASE_URL, session_id)
-    time.sleep(1)
-
-    # Now visit the login page to get the form structure
-    login_url = "https://www.lexology.com/account/login"
-    login_page_solution = get_url_with_flaresolverr(login_url, session_id)
-
-    if not login_page_solution:
-        print("Failed to load login page")
-        return False
-
-    # Save the login page for debugging
-    with open("login_page.html", "w", encoding="utf-8") as f:
-        f.write(login_page_solution["response"])
-
-    # Extract form details and CSRF token if present
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(login_page_solution["response"], 'html.parser')
-
-    # Find the login form
-    login_form = soup.find('form', {'id': 'LogInForm'})
-    if not login_form:
-        print("Warning: Could not find login form with id 'LogInForm'")
-        login_form = soup.find('form', {'action': '/Account/Login'})
-
-    if not login_form:
-        print("Error: Could not find login form")
-        return False
-
-    # Get the form action URL
-    form_action = login_form.get('action', '')
-    if form_action:
-        if not form_action.startswith('http'):
-            if form_action.startswith('/'):
-                form_action = f"{LEXOLOGY_BASE_URL}{form_action}"
-            else:
-                form_action = f"{LEXOLOGY_BASE_URL}/{form_action}"
-    else:
-        form_action = login_url
-
-    print(f"Form action URL: {form_action}")
-
-    # Check for CSRF token or other hidden inputs
-    hidden_inputs = {}
-    for hidden in login_form.find_all('input', {'type': 'hidden'}):
-        if hidden.has_attr('name') and hidden.has_attr('value'):
-            hidden_inputs[hidden['name']] = hidden['value']
-
-    # Get user credentials
-    email = input("Enter your Lexology email address: ")
-    password = input("Enter your Lexology password: ")
-
-    # Build the post data
-    post_data = f"EmailAddress={quote(email)}&Password={quote(password)}&Submit=Login"
-
-    # Add any hidden fields
-    for name, value in hidden_inputs.items():
-        post_data += f"&{name}={quote(value)}"
-
-    print(f"Submitting login form...")
-
-    # Submit the login form
-    login_payload = {
-        "cmd": "request.post",
-        "url": form_action,
-        "session": session_id,
-        "postData": post_data,
-        "maxTimeout": 60000
-    }
-
-    login_response = requests.post(FLARESOLVERR_URL, json=login_payload)
-    login_data = login_response.json()
-
-    if login_data["status"] == "ok":
-        # Save response for debugging
-        with open("login_response.html", "w", encoding="utf-8") as f:
-            f.write(login_data["solution"]["response"])
-
-        print(f"Form submitted successfully. Landed on: {login_data['solution']['url']}")
-
-        # Verify login success by checking if we're redirected to the account page
-        # or by testing access to a restricted article
-        test_article_url = "https://www.lexology.com/library/detail.aspx?g=88f7bf3f-94e2-4813-9cec-bc49bd9228fd"
-        test_solution = get_url_with_flaresolverr(test_article_url, session_id)
-
-        if test_solution:
-            # Check if login wall is present
-            if "Log in or register" not in test_solution["response"] and "Please login" not in test_solution[
-                "response"]:
-                print("Login successful! Can access protected content.")
-                return True
-            else:
-                print("Login appears to have failed - still seeing login wall")
-                with open("test_article_after_login.html", "w", encoding="utf-8") as f:
-                    f.write(test_solution["response"])
-                return False
-    else:
-        print(f"Login request failed: {login_data.get('message')}")
-        return False
+    def flush(self):
+        pass
 
 
-def destroy_flaresolverr_session(session_id):
-    """Destroy a FlareSolverr session"""
-    if not session_id:
-        print("No session ID provided, nothing to destroy")
-        return
+class LexologyScraper:
+    def __init__(self):
+        self.session_id = None
+        self.login_successful = False
+        self.articles = []
+        self.current_page = 1
+        self.total_pages = 0
+        self.current_article = 0
+        self.total_articles = 0
+        self.stop_requested = False
+        self.stats = {
+            "pdfs_saved": 0,
+            "htmls_saved": 0,
+            "login_required": 0
+        }
 
-    payload = {
-        "cmd": "sessions.destroy",
-        "session": session_id
-    }
+    def create_flaresolverr_session(self):
+        """Create a new FlareSolverr session"""
+        payload = {
+            "cmd": "sessions.create"
+        }
 
-    response = requests.post(FLARESOLVERR_URL, json=payload)
-    data = response.json()
-
-    if data["status"] == "ok":
-        print(f"Destroyed FlareSolverr session: {session_id}")
-    else:
-        print(f"Warning: Failed to destroy session: {data['message']}")
-
-
-def get_url_with_flaresolverr(url, session_id=None):
-    """Make a request to a URL using FlareSolverr"""
-    payload = {
-        "cmd": "request.get",
-        "url": url,
-        "maxTimeout": 60000
-    }
-
-    if session_id:
-        payload["session"] = session_id
-
-    print(f"Requesting {url} through FlareSolverr...")
-    response = requests.post(FLARESOLVERR_URL, json=payload)
-
-    try:
+        response = requests.post(FLARESOLVERR_URL, json=payload)
         data = response.json()
+
         if data["status"] == "ok":
-            return data["solution"]
+            print(f"Created FlareSolverr session: {data['session']}")
+            return data["session"]
         else:
-            print(f"FlareSolverr error: {data['message']}")
+            raise Exception(f"Failed to create FlareSolverr session: {data['message']}")
+
+    def login_to_lexology(self, email, password):
+        """Login to Lexology using FlareSolverr session"""
+        print("Attempting to log in to Lexology...")
+
+        # First visit the main site to get cookies
+        self.get_url_with_flaresolverr(LEXOLOGY_BASE_URL)
+        time.sleep(1)
+
+        # Now visit the login page to get the form structure
+        login_url = "https://www.lexology.com/account/login"
+        login_page_solution = self.get_url_with_flaresolverr(login_url)
+
+        if not login_page_solution:
+            print("Failed to load login page")
+            return False
+
+        # Extract form details and CSRF token if present
+        soup = BeautifulSoup(login_page_solution["response"], 'html.parser')
+
+        # Find the login form
+        login_form = soup.find('form', {'id': 'LogInForm'})
+        if not login_form:
+            print("Warning: Could not find login form with id 'LogInForm'")
+            login_form = soup.find('form', {'action': '/Account/Login'})
+
+        if not login_form:
+            print("Error: Could not find login form")
+            return False
+
+        # Get the form action URL
+        form_action = login_form.get('action', '')
+        if form_action:
+            if not form_action.startswith('http'):
+                if form_action.startswith('/'):
+                    form_action = f"{LEXOLOGY_BASE_URL}{form_action}"
+                else:
+                    form_action = f"{LEXOLOGY_BASE_URL}/{form_action}"
+        else:
+            form_action = login_url
+
+        print(f"Form action URL: {form_action}")
+
+        # Check for CSRF token or other hidden inputs
+        hidden_inputs = {}
+        for hidden in login_form.find_all('input', {'type': 'hidden'}):
+            if hidden.has_attr('name') and hidden.has_attr('value'):
+                hidden_inputs[hidden['name']] = hidden['value']
+
+        # Build the post data
+        post_data = f"EmailAddress={quote(email)}&Password={quote(password)}&Submit=Login"
+
+        # Add any hidden fields
+        for name, value in hidden_inputs.items():
+            post_data += f"&{name}={quote(value)}"
+
+        print(f"Submitting login form...")
+
+        # Submit the login form
+        login_payload = {
+            "cmd": "request.post",
+            "url": form_action,
+            "session": self.session_id,
+            "postData": post_data,
+            "maxTimeout": 60000
+        }
+
+        login_response = requests.post(FLARESOLVERR_URL, json=login_payload)
+        login_data = login_response.json()
+
+        if login_data["status"] == "ok":
+            print(f"Form submitted successfully. Landed on: {login_data['solution']['url']}")
+
+            # Verify login success by checking if we're redirected to the account page
+            # or by testing access to a restricted article
+            test_article_url = "https://www.lexology.com/library/detail.aspx?g=88f7bf3f-94e2-4813-9cec-bc49bd9228fd"
+            test_solution = self.get_url_with_flaresolverr(test_article_url)
+
+            if test_solution:
+                # Check if login wall is present
+                if "Log in or register" not in test_solution["response"] and "Please login" not in test_solution[
+                    "response"]:
+                    print("Login successful! Can access protected content.")
+                    return True
+                else:
+                    print("Login appears to have failed - still seeing login wall")
+                    return False
+        else:
+            print(f"Login request failed: {login_data.get('message')}")
+            return False
+
+    def destroy_flaresolverr_session(self):
+        """Destroy a FlareSolverr session"""
+        if not self.session_id:
+            print("No session ID provided, nothing to destroy")
+            return
+
+        payload = {
+            "cmd": "sessions.destroy",
+            "session": self.session_id
+        }
+
+        response = requests.post(FLARESOLVERR_URL, json=payload)
+        data = response.json()
+
+        if data["status"] == "ok":
+            print(f"Destroyed FlareSolverr session: {self.session_id}")
+        else:
+            print(f"Warning: Failed to destroy session: {data['message']}")
+
+    def get_url_with_flaresolverr(self, url):
+        """Make a request to a URL using FlareSolverr"""
+        payload = {
+            "cmd": "request.get",
+            "url": url,
+            "maxTimeout": 60000
+        }
+
+        if self.session_id:
+            payload["session"] = self.session_id
+
+        print(f"Requesting {url} through FlareSolverr...")
+        response = requests.post(FLARESOLVERR_URL, json=payload)
+
+        try:
+            data = response.json()
+            if data["status"] == "ok":
+                return data["solution"]
+            else:
+                print(f"FlareSolverr error: {data['message']}")
+                return None
+        except Exception as e:
+            print(f"Error parsing FlareSolverr response: {e}")
             return None
-    except Exception as e:
-        print(f"Error parsing FlareSolverr response: {e}")
-        return None
 
+    def is_login_required(self, html_content):
+        """Check if the page requires login"""
+        login_indicators = [
+            "Please log in to view this article",
+            "You must login to read this article",
+            "Log in or register",
+            "Please login",
+            "To access the Lexology website, you must either log in or"
+        ]
 
-def is_login_required(html_content):
-    """Check if the page requires login"""
-    login_indicators = [
-        "Please log in to view this article",
-        "You must login to read this article",
-        "Log in or register",
-        "Please login",
-        "To access the Lexology website, you must either log in or"
-    ]
+        for indicator in login_indicators:
+            if indicator in html_content:
+                return True
 
-    for indicator in login_indicators:
-        if indicator in html_content:
-            return True
+        return False
 
-    return False
+    def extract_articles_from_html(self, html_content):
+        """Extract article links from search results HTML"""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        articles = []
 
+        # Look for article containers
+        article_elements = soup.select("article") or soup.select(".results-container article") or soup.select(
+            ".article-list article")
 
-def extract_articles_from_html(html_content):
-    """Extract article links from search results HTML"""
-    from bs4 import BeautifulSoup
+        if not article_elements:
+            # Try to find article links if no article containers found
+            article_links = soup.select("a[href*='/library/detail.aspx']") or soup.select("a.article")
 
-    soup = BeautifulSoup(html_content, 'html.parser')
-    articles = []
-
-    # Look for article containers
-    article_elements = soup.select("article") or soup.select(".results-container article") or soup.select(
-        ".article-list article")
-
-    if not article_elements:
-        # Try to find article links if no article containers found
-        article_links = soup.select("a[href*='/library/detail.aspx']") or soup.select("a.article")
-
-        for link in article_links:
-            url = link.get("href")
-            if url and not url.startswith(("http://", "https://")):
-                url = f"{LEXOLOGY_BASE_URL}{url}"
-
-            title = link.get_text().strip()
-            if not title and link.select_one("h3"):
-                title = link.select_one("h3").get_text().strip()
-
-            articles.append({
-                "title": title or "Unknown title",
-                "url": url
-            })
-    else:
-        for article in article_elements:
-            # Extract title and URL
-            title_element = article.select_one("h3 a") or article.select_one("h2 a") or article.select_one(".title a")
-
-            if title_element:
-                title = title_element.get_text().strip()
-                url = title_element.get("href")
-
+            for link in article_links:
+                url = link.get("href")
                 if url and not url.startswith(("http://", "https://")):
                     url = f"{LEXOLOGY_BASE_URL}{url}"
 
-                # Extract firm/publisher
-                firm = "Unknown"
-                for selector in [".firm-name", ".author-firm", ".publisher"]:
-                    firm_element = article.select_one(selector)
-                    if firm_element:
-                        firm = firm_element.get_text().strip()
-                        break
-
-                # Extract date
-                date = "Unknown"
-                for selector in [".date", ".published-date", "time"]:
-                    date_element = article.select_one(selector)
-                    if date_element:
-                        date = date_element.get_text().strip()
-                        break
+                title = link.get_text().strip()
+                if not title and link.select_one("h3"):
+                    title = link.select_one("h3").get_text().strip()
 
                 articles.append({
-                    "title": title,
-                    "url": url,
-                    "firm": firm,
-                    "date": date
+                    "title": title or "Unknown title",
+                    "url": url
                 })
+        else:
+            for article in article_elements:
+                # Extract title and URL
+                title_element = article.select_one("h3 a") or article.select_one("h2 a") or article.select_one(
+                    ".title a")
 
-    print(f"Found {len(articles)} articles on page")
-    return articles
+                if title_element:
+                    title = title_element.get_text().strip()
+                    url = title_element.get("href")
 
+                    if url and not url.startswith(("http://", "https://")):
+                        url = f"{LEXOLOGY_BASE_URL}{url}"
 
-def extract_next_page_url(html_content, current_url):
-    """Extract next page URL from search results HTML"""
-    from bs4 import BeautifulSoup
+                    # Extract firm/publisher
+                    firm = "Unknown"
+                    for selector in [".firm-name", ".author-firm", ".publisher"]:
+                        firm_element = article.select_one(selector)
+                        if firm_element:
+                            firm = firm_element.get_text().strip()
+                            break
 
-    soup = BeautifulSoup(html_content, 'html.parser')
-    next_link = soup.select_one("a.next-page") or soup.select_one("a.next")
+                    # Extract date
+                    date = "Unknown"
+                    for selector in [".date", ".published-date", "time"]:
+                        date_element = article.select_one(selector)
+                        if date_element:
+                            date = date_element.get_text().strip()
+                            break
 
-    if next_link and not next_link.get("disabled"):
-        next_url = next_link.get("href")
-        if next_url and not next_url.startswith(("http://", "https://")):
-            # Handle relative URLs
-            parsed_current = urlparse(current_url)
-            base_url = f"{parsed_current.scheme}://{parsed_current.netloc}"
-            next_url = f"{base_url}{next_url}"
-        return next_url
+                    articles.append({
+                        "title": title,
+                        "url": url,
+                        "firm": firm,
+                        "date": date
+                    })
 
-    return None
+        print(f"Found {len(articles)} articles on page")
+        return articles
 
+    def extract_next_page_url(self, html_content, current_url):
+        """Extract next page URL from search results HTML"""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        next_link = soup.select_one("a.next-page") or soup.select_one("a.next")
 
-def extract_metadata_from_article(html_content):
-    """Extract metadata from article page HTML"""
-    from bs4 import BeautifulSoup
+        if next_link and not next_link.get("disabled"):
+            next_url = next_link.get("href")
+            if next_url and not next_url.startswith(("http://", "https://")):
+                # Handle relative URLs
+                parsed_current = urlparse(current_url)
+                base_url = f"{parsed_current.scheme}://{parsed_current.netloc}"
+                next_url = f"{base_url}{next_url}"
+            return next_url
 
-    soup = BeautifulSoup(html_content, 'html.parser')
+        return None
 
-    # Extract title
-    title = "Unknown Title"
-    title_element = soup.select_one("h1")
-    if title_element:
-        title = title_element.get_text().strip()
+    def extract_page_number_from_url(self, url):
+        """Try to extract the page number from the URL"""
+        parsed_url = urlparse(url)
+        query_params = parse_qs(parsed_url.query)
 
-    # Extract firm
-    firm = "Unknown"
-    for selector in [".firm-name", ".author-firm", ".publisher"]:
-        firm_element = soup.select_one(selector)
-        if firm_element:
-            firm = firm_element.get_text().strip()
-            break
+        # Check for common pagination parameters
+        page_params = ['page', 'p', 'pg']
+        for param in page_params:
+            if param in query_params and query_params[param][0].isdigit():
+                return int(query_params[param][0])
 
-    # Extract date
-    date = "Unknown"
-    for selector in [".date", ".published-date", "time"]:
-        date_element = soup.select_one(selector)
-        if date_element:
-            date = date_element.get_text().strip()
-            break
+        # If no page parameter found, check for URL patterns like /page/2
+        path_segments = parsed_url.path.split('/')
+        for i, segment in enumerate(path_segments):
+            if segment.lower() in ['page', 'p'] and i + 1 < len(path_segments) and path_segments[i + 1].isdigit():
+                return int(path_segments[i + 1])
 
-    return {
-        "title": title,
-        "firm": firm,
-        "date": date
-    }
+        return None
 
+    def extract_metadata_from_article(self, html_content):
+        """Extract metadata from article page HTML"""
+        soup = BeautifulSoup(html_content, 'html.parser')
 
-def html_to_pdf_playwright(html_content, output_path):
-    """Convert HTML to PDF using Playwright (much faster than wkhtmltopdf)"""
-    try:
-        from playwright.sync_api import sync_playwright
+        # Extract title
+        title = "Unknown Title"
+        title_element = soup.select_one("h1")
+        if title_element:
+            title = title_element.get_text().strip()
 
-        # Create a temporary HTML file
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.html', mode='w', encoding='utf-8') as f:
-            temp_html_path = f.name
-            f.write(html_content)
-
-        with sync_playwright() as p:
-            # Launch a headless Chromium browser
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-
-            # Load the HTML content from the temp file using file:// protocol
-            page.goto(f'file://{temp_html_path}', wait_until="networkidle")
-
-            # Generate PDF
-            page.pdf(path=output_path, format='A4')
-
-            browser.close()
-
-        # Delete the temporary file
-        os.unlink(temp_html_path)
-
-        print(f"Successfully generated PDF using Playwright: {output_path}")
-        return True
-    except Exception as e:
-        print(f"Error generating PDF with Playwright: {e}")
-        # Fall back to saving HTML
-        with open(output_path.replace('.pdf', '.html'), 'w', encoding='utf-8') as f:
-            f.write(html_content)
-        print(f"Saved HTML instead: {output_path.replace('.pdf', '.html')}")
-        return False
-
-
-def save_as_html(html_content, title, article, suffix=""):
-    """Helper function to save HTML content"""
-    safe_title = "".join(c if c.isalnum() else "_" for c in title)
-    safe_title = safe_title[:100]  # Limit filename length
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    firm = article.get('firm', 'Unknown').replace(' ', '_')
-    html_filename = f"{timestamp}_{safe_title}_{firm}{suffix}.html"
-    html_path = os.path.join(pdf_dir, html_filename)
-
-    with open(html_path, 'w', encoding='utf-8') as f:
-        f.write(html_content)
-
-    print(f"Saved HTML: {html_filename}")
-    article["html_filename"] = html_filename
-    return html_filename
-
-
-def scrape_lexology_articles():
-    """Main function to scrape Lexology articles"""
-    # Create a FlareSolverr session
-    session_id = None
-    try:
-        session_id = create_flaresolverr_session()
-
-        # Try to login if you have credentials
-        login_successful = False
-        try_login = input("Do you want to login to Lexology to access more articles? (y/n): ").strip().lower()
-        if try_login == 'y':
-            login_successful = login_to_lexology(session_id)
-
-        # Initialize list to store article data
-        articles = []
-        current_url = SEARCH_URL
-        page_number = 1
-
-        # Process each page of search results
-        while current_url:
-            print(f"Processing page {page_number}...")
-
-            # Get the search results page
-            solution = get_url_with_flaresolverr(current_url, session_id)
-            if not solution:
-                print(f"Failed to get page {page_number}, stopping")
+        # Extract firm
+        firm = "Unknown"
+        for selector in [".firm-name", ".author-firm", ".publisher"]:
+            firm_element = soup.select_one(selector)
+            if firm_element:
+                firm = firm_element.get_text().strip()
                 break
 
-            # Check if we hit a login page or access restriction
-            if is_login_required(solution["response"]):
-                if not login_successful and try_login != 'y':
-                    print("Hit login requirement. Trying to login now...")
-                    try_login = 'y'
-                    login_successful = login_to_lexology(session_id)
-                    if login_successful:
-                        # Try the page again after login
-                        solution = get_url_with_flaresolverr(current_url, session_id)
-                    else:
-                        print("Login failed or not attempted. Limited to free articles only.")
+        # Extract date
+        date = "Unknown"
+        for selector in [".date", ".published-date", "time"]:
+            date_element = soup.select_one(selector)
+            if date_element:
+                date = date_element.get_text().strip()
+                break
 
-            # Extract articles from the page
-            page_articles = extract_articles_from_html(solution["response"])
+        return {
+            "title": title,
+            "firm": firm,
+            "date": date
+        }
 
-            # Debug - print found articles with their properties
-            print("Articles found on this page:")
-            for idx, art in enumerate(page_articles):
-                print(f"  Article {idx + 1}: {art.get('title', 'No title')} - Properties: {', '.join(art.keys())}")
+    def html_to_pdf_pdfkit(self, html_content, output_path):
+        """Convert HTML to PDF using pdfkit (wkhtmltopdf wrapper)"""
+        try:
+            # Check if pdfkit/wkhtmltopdf is installed
+            if not shutil.which('wkhtmltopdf'):
+                print("Warning: wkhtmltopdf not found in PATH. PDF generation may fail.")
+                print("Install wkhtmltopdf from: https://wkhtmltopdf.org/downloads.html")
 
-            # Process each article
-            for article in page_articles:
-                if not article.get("url"):
-                    continue
+            # Create a temporary HTML file with cookie handling script
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.html', mode='w', encoding='utf-8') as f:
+                modified_html = self.handle_cookie_consent(html_content)
+                f.write(modified_html)
+                temp_html_path = f.name
 
-                title = article.get('title', 'Unknown title')
-                url = article.get('url')
+            # Configure pdfkit options
+            options = {
+                'page-size': 'A4',
+                'encoding': 'UTF-8',
+                'javascript-delay': 1000,  # Wait 1 second for JavaScript to run
+                'no-stop-slow-scripts': None,
+                'enable-javascript': None,
+                'disable-smart-shrinking': None,  # Improves rendering of some page layouts
+                'quiet': None
+            }
 
-                print(f"Processing article: {title}")
+            # Generate PDF
+            pdfkit.from_file(temp_html_path, output_path, options=options)
 
-                # Get the article page
-                article_solution = get_url_with_flaresolverr(url, session_id)
-                if not article_solution:
-                    print(f"Failed to get article, skipping")
-                    continue
+            # Delete the temporary file
+            os.unlink(temp_html_path)
+
+            print(f"Successfully generated PDF: {output_path}")
+            self.stats["pdfs_saved"] += 1
+            return True
+        except Exception as e:
+            print(f"Error generating PDF: {e}")
+            # Fall back to saving HTML
+            with open(output_path.replace('.pdf', '.html'), 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            print(f"Saved HTML instead: {output_path.replace('.pdf', '.html')}")
+            self.stats["htmls_saved"] += 1
+            return False
+
+    def save_as_html(self, html_content, title, article, output_dir, suffix=""):
+        """Helper function to save HTML content"""
+        safe_title = "".join(c if c.isalnum() else "_" for c in title)
+        safe_title = safe_title[:100]  # Limit filename length
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        firm = article.get('firm', 'Unknown').replace(' ', '_')
+        html_filename = f"{timestamp}_{safe_title}_{firm}{suffix}.html"
+        html_path = os.path.join(output_dir, html_filename)
+
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+
+        print(f"Saved HTML: {html_filename}")
+        article["html_filename"] = html_filename
+        self.stats["htmls_saved"] += 1
+
+        if suffix == "_LOGIN_REQUIRED":
+            self.stats["login_required"] += 1
+
+        return html_filename
+
+    def handle_cookie_consent(self, html_content):
+        """
+        Modify HTML content to inject cookie consent handling JavaScript
+        Returns modified HTML with cookie handling
+        """
+        # Add script to handle cookie consent automatically
+        cookie_script = """
+        <script>
+        window.addEventListener('load', function() {
+            // Try to find and click cookie consent buttons
+            var selectors = [
+                'button:contains("Accept Cookies")', 
+                'button.cookie-accept-button',
+                '#acceptCookies',
+                '.cookies-accept',
+                'button.accept-cookies',
+                'a.accept-cookies'
+            ];
+
+            function findAndClick() {
+                for (var i = 0; i < selectors.length; i++) {
+                    try {
+                        var elements = document.querySelectorAll(selectors[i]);
+                        if (elements.length > 0) {
+                            console.log('Found cookie button:', selectors[i]);
+                            elements[0].click();
+                            return true;
+                        }
+                    } catch(e) {
+                        console.error('Error finding cookie button:', e);
+                    }
+                }
+                return false;
+            }
+
+            // Try immediately
+            if (!findAndClick()) {
+                // Try again after a short delay
+                setTimeout(findAndClick, 1000);
+            }
+        });
+        </script>
+        """
+
+        # Insert the script at the end of the head or beginning of body
+        modified_html = html_content
+        if '<head>' in html_content:
+            modified_html = html_content.replace('</head>', cookie_script + '</head>')
+        elif '<body>' in html_content:
+            modified_html = html_content.replace('<body>', '<body>' + cookie_script)
+        else:
+            modified_html = cookie_script + html_content
+
+        # Add CSS to hide cookie banners
+        cookie_css = """
+        <style>
+        .cookie-banner, .cookies-notice, .cookie-consent, .cookie-dialog, 
+        .cookie-popup, .cookies-popup, #cookie-banner, #cookies-notice, 
+        #cookie-consent, #cookie-dialog, #cookie-popup, #cookies-popup,
+        div[class*="cookie-"], div[id*="cookie-"] {
+            display: none !important;
+            visibility: hidden !important;
+            opacity: 0 !important;
+        }
+        </style>
+        """
+
+        if '<head>' in modified_html:
+            modified_html = modified_html.replace('<head>', '<head>' + cookie_css)
+        else:
+            modified_html = cookie_css + modified_html
+
+        return modified_html
+
+    def check_flaresolverr(self):
+        """Check if FlareSolverr is running"""
+        try:
+            response = requests.post(FLARESOLVERR_URL, json={"cmd": "sessions.list"})
+            response.raise_for_status()
+            print("FlareSolverr is running")
+            return True
+        except Exception as e:
+            print(f"Error: FlareSolverr is not running or not accessible at {FLARESOLVERR_URL}")
+            print("Please make sure FlareSolverr is installed and running before using this script")
+            print("Installation instructions: https://github.com/FlareSolverr/FlareSolverr")
+            return False
+
+    def navigate_to_page(self, search_url, target_page, status_callback=None):
+        """Navigate to a specific page number"""
+        if target_page <= 1:
+            return search_url, 1
+
+        # See if we can determine pagination format from the URL
+        parsed_url = urlparse(search_url)
+        query_params = parse_qs(parsed_url.query)
+
+        # Try to directly construct the target page URL if the URL contains page parameters
+        for page_param in ['page', 'p', 'pg']:
+            if page_param in query_params:
+                # Create a new query string with updated page parameter
+                new_query = dict(query_params)
+                new_query[page_param] = [str(target_page)]
+
+                # Reconstruct the query string
+                query_string = '&'.join([f"{k}={'&'.join(v)}" for k, v in new_query.items()])
+
+                # Build the new URL
+                url_parts = list(parsed_url)
+                url_parts[4] = query_string
+                direct_url = urlparse.urlunparse(url_parts)
+
+                # Try the direct URL
+                if status_callback:
+                    status_callback(f"Trying direct navigation to page {target_page}...")
+
+                solution = self.get_url_with_flaresolverr(direct_url)
+                if solution:
+                    # Verify we're on the right page
+                    page_number = self.extract_page_number_from_url(solution["url"])
+                    if page_number and page_number == target_page:
+                        if status_callback:
+                            status_callback(f"Successfully navigated to page {target_page}")
+                        return direct_url, target_page
+
+        # If direct navigation failed or not possible, navigate page by page
+        if status_callback:
+            status_callback(f"Navigating sequentially to page {target_page}...")
+
+        current_url = search_url
+        current_page = 1
+
+        while current_page < target_page:
+            solution = self.get_url_with_flaresolverr(current_url)
+            if not solution:
+                if status_callback:
+                    status_callback(f"Failed to navigate to page {current_page + 1}, starting from page {current_page}")
+                break
+
+            next_page_url = self.extract_next_page_url(solution["response"], current_url)
+            if next_page_url and next_page_url != current_url:
+                current_url = next_page_url
+                current_page += 1
+                if status_callback:
+                    status_callback(f"Navigated to page {current_page}/{target_page}...")
+            else:
+                if status_callback:
+                    status_callback(f"Could not find next page link at page {current_page}")
+                break
+
+        return current_url, current_page
+
+    def start_scraping(self, search_url, output_dir, email, password, save_as_pdf, handle_cookies, max_pages=0,
+                       start_page=1, progress_callback=None, status_callback=None):
+        """Main function to scrape Lexology articles"""
+        self.stop_requested = False
+        self.articles = []
+        self.stats = {
+            "pdfs_saved": 0,
+            "htmls_saved": 0,
+            "login_required": 0
+        }
+
+        try:
+            # Create output directory
+            os.makedirs(output_dir, exist_ok=True)
+
+            # Create a FlareSolverr session
+            self.session_id = self.create_flaresolverr_session()
+
+            # Try to login with provided credentials
+            if email and password:
+                status_callback("Logging in to Lexology...")
+                self.login_successful = self.login_to_lexology(email, password)
+                if self.login_successful:
+                    status_callback("Login successful")
+                else:
+                    status_callback("Login failed - limited to free articles only")
+            else:
+                status_callback("No login credentials provided - limited to free articles only")
+
+            # If start_page > 1, navigate to that page
+            if start_page > 1:
+                status_callback(f"Navigating to start page {start_page}...")
+                current_url, self.current_page = self.navigate_to_page(search_url, start_page, status_callback)
+                if self.current_page < start_page:
+                    status_callback(f"Could only reach page {self.current_page}, starting from there")
+            else:
+                current_url = search_url
+                self.current_page = 1
+
+            # Process each page of search results
+            while current_url and not self.stop_requested:
+                if max_pages > 0 and self.current_page > start_page + max_pages - 1:
+                    status_callback(f"Reached maximum number of pages ({max_pages} from start page {start_page})")
+                    break
+
+                status_callback(f"Processing page {self.current_page}...")
+
+                # Get the search results page
+                solution = self.get_url_with_flaresolverr(current_url)
+                if not solution:
+                    status_callback(f"Failed to get page {self.current_page}, stopping")
+                    break
 
                 # Check if we hit a login page
-                if is_login_required(article_solution["response"]):
-                    # Try to login again if session expired
-                    if login_successful:
-                        print("Session appears to have expired. Trying to login again...")
-                        login_successful = login_to_lexology(session_id)
-                        if login_successful:
-                            # Try the article again after login
-                            article_solution = get_url_with_flaresolverr(url, session_id)
-                            # Check if still hitting login wall
-                            if is_login_required(article_solution["response"]):
-                                print("Still hitting login wall after re-login. Saving as login required.")
-                                save_as_html(article_solution["response"], title, article, "_LOGIN_REQUIRED")
-                                continue
+                if self.is_login_required(solution["response"]):
+                    if not self.login_successful and email and password:
+                        status_callback("Hit login requirement. Trying to login now...")
+                        self.login_successful = self.login_to_lexology(email, password)
+                        if self.login_successful:
+                            # Try the page again after login
+                            solution = self.get_url_with_flaresolverr(current_url)
                         else:
-                            print("Re-login failed. Saving as login required.")
-                            save_as_html(article_solution["response"], title, article, "_LOGIN_REQUIRED")
-                            continue
-                    else:
-                        print("Login required for this article. Saving login page as HTML.")
-                        save_as_html(article_solution["response"], title, article, "_LOGIN_REQUIRED")
+                            status_callback("Login failed. Limited to free articles only.")
+
+                # Extract articles from the page
+                page_articles = self.extract_articles_from_html(solution["response"])
+                self.current_article = 0
+                self.total_articles = len(page_articles)
+
+                # Update page progress
+                if progress_callback:
+                    progress_callback(0, self.total_articles)
+
+                # Process each article
+                for article in page_articles:
+                    self.current_article += 1
+
+                    if self.stop_requested:
+                        status_callback("Scraping stopped by user")
+                        break
+
+                    if not article.get("url"):
                         continue
 
-                # Extract full metadata from article page if needed
-                if article.get("firm") == "Unknown" or article.get("date") == "Unknown":
-                    metadata = extract_metadata_from_article(article_solution["response"])
-                    article["firm"] = metadata["firm"] if article.get("firm") == "Unknown" else article["firm"]
-                    article["date"] = metadata["date"] if article.get("date") == "Unknown" else article["date"]
+                    title = article.get('title', 'Unknown title')
+                    url = article.get('url')
 
-                # Generate safe filename
-                safe_title = "".join(c if c.isalnum() else "_" for c in title)
-                safe_title = safe_title[:100]  # Limit filename length
+                    status_callback(f"Processing article {self.current_article}/{self.total_articles}: {title}")
 
-                # Ask if user wants to save as PDF (to speed up if just wanting HTML)
-                save_as_pdf = input(f"Save '{title}' as PDF? (y/n, default: y): ").strip().lower() != 'n'
+                    # Update article progress
+                    if progress_callback:
+                        progress_callback(self.current_article, self.total_articles)
 
-                if save_as_pdf:
-                    # Generate PDF filename
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    # Handle case where firm info might be missing
-                    firm = article.get('firm', 'Unknown').replace(' ', '_')
-                    pdf_filename = f"{timestamp}_{safe_title}_{firm}.pdf"
-                    pdf_path = os.path.join(pdf_dir, pdf_filename)
+                    # Get the article page
+                    article_solution = self.get_url_with_flaresolverr(url)
+                    if not article_solution:
+                        status_callback(f"Failed to get article, skipping")
+                        continue
 
-                    # Save the article as PDF using Playwright
-                    if html_to_pdf_playwright(article_solution["response"], pdf_path):
-                        print(f"Saved PDF: {pdf_filename}")
-                        article["pdf_filename"] = pdf_filename
+                    # Check if we hit a login page
+                    if self.is_login_required(article_solution["response"]):
+                        # Try to login again if session expired
+                        if self.login_successful:
+                            status_callback("Session appears to have expired. Trying to login again...")
+                            self.login_successful = self.login_to_lexology(email, password)
+                            if self.login_successful:
+                                # Try the article again after login
+                                article_solution = self.get_url_with_flaresolverr(url)
+                                # Check if still hitting login wall
+                                if self.is_login_required(article_solution["response"]):
+                                    status_callback(
+                                        "Still hitting login wall after re-login. Saving as login required.")
+                                    self.save_as_html(article_solution["response"], title, article, output_dir,
+                                                      "_LOGIN_REQUIRED")
+                                    continue
+                            else:
+                                status_callback("Re-login failed. Saving as login required.")
+                                self.save_as_html(article_solution["response"], title, article, output_dir,
+                                                  "_LOGIN_REQUIRED")
+                                continue
+                        else:
+                            status_callback("Login required for this article. Saving login page as HTML.")
+                            self.save_as_html(article_solution["response"], title, article, output_dir,
+                                              "_LOGIN_REQUIRED")
+                            continue
+
+                    # Extract full metadata from article page if needed
+                    if article.get("firm") == "Unknown" or article.get("date") == "Unknown":
+                        metadata = self.extract_metadata_from_article(article_solution["response"])
+                        article["firm"] = metadata["firm"] if article.get("firm") == "Unknown" else article["firm"]
+                        article["date"] = metadata["date"] if article.get("date") == "Unknown" else article["date"]
+
+                    # Generate safe filename
+                    safe_title = "".join(c if c.isalnum() else "_" for c in title)
+                    safe_title = safe_title[:100]  # Limit filename length
+
+                    # Modify HTML to handle cookie consent if enabled
+                    if handle_cookies:
+                        article_solution["response"] = self.handle_cookie_consent(article_solution["response"])
+
+                    if save_as_pdf:
+                        # Generate PDF filename
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        firm = article.get('firm', 'Unknown').replace(' ', '_')
+                        pdf_filename = f"{timestamp}_{safe_title}_{firm}.pdf"
+                        pdf_path = os.path.join(output_dir, pdf_filename)
+
+                        # Save the article as PDF using pdfkit
+                        if self.html_to_pdf_pdfkit(article_solution["response"], pdf_path):
+                            status_callback(f"Saved PDF: {pdf_filename}")
+                            article["pdf_filename"] = pdf_filename
+                        else:
+                            status_callback(f"Failed to save PDF, saved as HTML instead")
+                            article["html_filename"] = pdf_filename.replace('.pdf', '.html')
                     else:
-                        print(f"Failed to save PDF, saved as HTML instead")
-                        article["html_filename"] = pdf_filename.replace('.pdf', '.html')
-                else:
-                    # Save as HTML only
-                    save_as_html(article_solution["response"], title, article)
+                        # Save as HTML only
+                        self.save_as_html(article_solution["response"], title, article, output_dir)
 
-                # Add article data to list
-                articles.append(article)
+                    # Add article data to list
+                    self.articles.append(article)
 
-            # Get the next page URL
-            next_page_url = extract_next_page_url(solution["response"], current_url)
-            if next_page_url and next_page_url != current_url:
-                continue_next = input(f"Continue to next page? (y/n, default: y): ").strip().lower() != 'n'
-                if continue_next:
+                # Get the next page URL
+                next_page_url = self.extract_next_page_url(solution["response"], current_url)
+                if next_page_url and next_page_url != current_url:
                     current_url = next_page_url
-                    page_number += 1
+                    self.current_page += 1
                 else:
                     current_url = None
+
+            # Save index to CSV
+            if self.articles:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = os.path.join(output_dir, f"lexology_articles_index_{timestamp}.csv")
+
+                with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                    fieldnames = ["title", "url", "firm", "date", "pdf_filename", "html_filename"]
+                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
+
+                    writer.writeheader()
+                    for article_item in self.articles:
+                        writer.writerow(article_item)
+
+                status_callback(f"Scraping completed. Saved {len(self.articles)} articles")
+                status_callback(
+                    f"PDFs: {self.stats['pdfs_saved']}, HTMLs: {self.stats['htmls_saved']}, Login required: {self.stats['login_required']}")
+                status_callback(f"Article index saved to {filename}")
             else:
-                current_url = None
+                status_callback("No articles were scraped")
 
-        # Save index to CSV
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"lexology_articles_index_{timestamp}.csv"
-
-        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ["title", "url", "firm", "date", "pdf_filename", "html_filename"]
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
-
-            writer.writeheader()
-            for article_item in articles:
-                writer.writerow(article_item)
-
-        print(f"Scraping completed. Saved {len(articles)} articles in the '{pdf_dir}' directory")
-        print(f"Article index saved to {filename}")
-
-    finally:
-        # Always destroy the session when done
-        try:
-            if session_id:
-                destroy_flaresolverr_session(session_id)
         except Exception as e:
-            print(f"Warning: Failed to destroy session: {e}")
+            status_callback(f"Error during scraping: {str(e)}")
+        finally:
+            # Always destroy the session when done
+            try:
+                if self.session_id:
+                    self.destroy_flaresolverr_session()
+            except Exception as e:
+                status_callback(f"Warning: Failed to destroy session: {str(e)}")
+
+        return self.articles
+
+    def stop_scraping(self):
+        """Signal to stop the scraping process"""
+        self.stop_requested = True
+        print("Stop requested. Completing current article and then stopping...")
+
+
+class LexologyScraperGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Lexology Scraper")
+        self.root.geometry("800x700")
+        self.root.minsize(700, 600)
+
+        # Configure the styling
+        self.style = ttk.Style()
+        self.style.theme_use('clam')  # or 'alt', 'default', 'classic', etc.
+
+        # Configure colors
+        bg_color = "#f5f5f5"
+        frame_bg = "#ffffff"
+        button_bg = "#4a86e8"
+
+        self.root.configure(bg=bg_color)
+        self.style.configure('TFrame', background=frame_bg)
+        self.style.configure('TLabel', background=frame_bg)
+        self.style.configure('TButton', background=button_bg)
+
+        # Create main frame
+        self.main_frame = ttk.Frame(root, padding="20 20 20 20")
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Create a scraper instance
+        self.scraper = LexologyScraper()
+        self.thread = None
+
+        # Set up the UI components
+        self.setup_ui()
+
+    def setup_ui(self):
+        # Create frames
+        self.config_frame = ttk.LabelFrame(self.main_frame, text="Configuration", padding="10 10 10 10")
+        self.config_frame.pack(fill=tk.X, expand=False, pady=(0, 10))
+
+        self.progress_frame = ttk.LabelFrame(self.main_frame, text="Progress", padding="10 10 10 10")
+        self.progress_frame.pack(fill=tk.X, expand=False, pady=(0, 10))
+
+        self.log_frame = ttk.LabelFrame(self.main_frame, text="Log", padding="10 10 10 10")
+        self.log_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Configuration widgets
+        # Search URL
+        ttk.Label(self.config_frame, text="Search URL:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.search_url_var = tk.StringVar(value=DEFAULT_SEARCH_URL)
+        ttk.Entry(self.config_frame, textvariable=self.search_url_var, width=50).grid(row=0, column=1,
+                                                                                      sticky=tk.W + tk.E, padx=5,
+                                                                                      pady=5)
+
+        # Output directory
+        ttk.Label(self.config_frame, text="Output Directory:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.output_dir_var = tk.StringVar(value=os.path.join(os.getcwd(), "lexology_pdfs"))
+        output_dir_entry = ttk.Entry(self.config_frame, textvariable=self.output_dir_var, width=40)
+        output_dir_entry.grid(row=1, column=1, sticky=tk.W + tk.E, padx=5, pady=5)
+        ttk.Button(self.config_frame, text="Browse", command=self.browse_output_dir).grid(row=1, column=2, padx=5,
+                                                                                          pady=5)
+
+        # Email and Password
+        ttk.Label(self.config_frame, text="Email:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.email_var = tk.StringVar(value="rashid.butt43@law.ac.uk")  # Pre-populated email
+        ttk.Entry(self.config_frame, textvariable=self.email_var, width=30).grid(row=2, column=1, sticky=tk.W, padx=5,
+                                                                                 pady=5)
+
+        ttk.Label(self.config_frame, text="Password:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        self.password_var = tk.StringVar()
+        ttk.Entry(self.config_frame, textvariable=self.password_var, show="*", width=30).grid(row=3, column=1,
+                                                                                              sticky=tk.W, padx=5,
+                                                                                              pady=5)
+
+        # Options frame
+        options_frame = ttk.Frame(self.config_frame)
+        options_frame.grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=10)
+
+        # Save as PDF option
+        self.save_as_pdf_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_frame, text="Save as PDF", variable=self.save_as_pdf_var).pack(side=tk.LEFT, padx=5)
+
+        # Handle cookies option
+        self.handle_cookies_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_frame, text="Auto-handle cookies", variable=self.handle_cookies_var).pack(side=tk.LEFT,
+                                                                                                          padx=5)
+
+        # Page options frame
+        page_options_frame = ttk.Frame(self.config_frame)
+        page_options_frame.grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=5)
+
+        # Start Page option
+        ttk.Label(page_options_frame, text="Start Page:").pack(side=tk.LEFT, padx=(0, 5))
+        self.start_page_var = tk.IntVar(value=1)
+        ttk.Spinbox(page_options_frame, from_=1, to=999, textvariable=self.start_page_var, width=5).pack(side=tk.LEFT,
+                                                                                                         padx=(0, 20))
+
+        # Max pages option
+        ttk.Label(page_options_frame, text="Max Pages (0 = all):").pack(side=tk.LEFT, padx=(0, 5))
+        self.max_pages_var = tk.IntVar(value=0)
+        ttk.Spinbox(page_options_frame, from_=0, to=999, textvariable=self.max_pages_var, width=5).pack(side=tk.LEFT)
+
+        # Action buttons
+        button_frame = ttk.Frame(self.config_frame)
+        button_frame.grid(row=6, column=0, columnspan=3, pady=10)
+
+        self.start_button = ttk.Button(button_frame, text="Start Scraping", command=self.start_scraping)
+        self.start_button.pack(side=tk.LEFT, padx=5)
+
+        self.stop_button = ttk.Button(button_frame, text="Stop", command=self.stop_scraping, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT, padx=5)
+
+        # Progress indicators
+        self.status_var = tk.StringVar(value="Ready")
+        ttk.Label(self.progress_frame, text="Status:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        ttk.Label(self.progress_frame, textvariable=self.status_var).grid(row=0, column=1, sticky=tk.W, pady=5)
+
+        self.page_var = tk.StringVar(value="Page: 0/0")
+        ttk.Label(self.progress_frame, text="Page Progress:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        ttk.Label(self.progress_frame, textvariable=self.page_var).grid(row=1, column=1, sticky=tk.W, pady=5)
+
+        self.article_var = tk.StringVar(value="Article: 0/0")
+        ttk.Label(self.progress_frame, text="Article Progress:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Label(self.progress_frame, textvariable=self.article_var).grid(row=2, column=1, sticky=tk.W, pady=5)
+
+        # Progress bars
+        ttk.Label(self.progress_frame, text="Current Page:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        self.article_progress = ttk.Progressbar(self.progress_frame, orient=tk.HORIZONTAL, length=300,
+                                                mode='determinate')
+        self.article_progress.grid(row=3, column=1, sticky=tk.W + tk.E, pady=5)
+
+        # Stats area
+        self.stats_frame = ttk.Frame(self.progress_frame)
+        self.stats_frame.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=5)
+
+        self.stats_var = tk.StringVar(value="")
+        ttk.Label(self.stats_frame, textvariable=self.stats_var).pack(fill=tk.X)
+
+        # Log area
+        self.log_text = scrolledtext.ScrolledText(self.log_frame, width=80, height=15)
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text.configure(state="disabled")
+
+        # Redirect stdout to log
+        self.log_redirector = LogRedirector(self.log_text)
+        sys.stdout = self.log_redirector
+
+    def browse_output_dir(self):
+        dir_path = filedialog.askdirectory(initialdir=self.output_dir_var.get())
+        if dir_path:
+            self.output_dir_var.set(dir_path)
+
+    def update_progress(self, current, total):
+        if total > 0:
+            self.article_progress['value'] = (current / total) * 100
+        else:
+            self.article_progress['value'] = 0
+        self.article_var.set(f"Article: {current}/{total}")
+
+        # Update stats if available
+        if hasattr(self.scraper, 'stats'):
+            stats = self.scraper.stats
+            self.stats_var.set(
+                f"Statistics - PDFs: {stats['pdfs_saved']}, HTMLs: {stats['htmls_saved']}, Login required: {stats['login_required']}")
+
+        self.root.update_idletasks()
+
+    def update_status(self, message):
+        self.status_var.set(message)
+        start_page = self.start_page_var.get()
+        max_pages = self.max_pages_var.get()
+
+        if max_pages > 0:
+            end_page = start_page + max_pages - 1
+            self.page_var.set(f"Page: {self.scraper.current_page}/{end_page}")
+        else:
+            self.page_var.set(f"Page: {self.scraper.current_page}/∞")
+
+        self.root.update_idletasks()
+
+    def start_scraping(self):
+        # Check if FlareSolverr is running
+        if not self.scraper.check_flaresolverr():
+            messagebox.showerror("Error", "FlareSolverr is not running. Please start FlareSolverr and try again.")
+            return
+
+        # Validate input
+        search_url = self.search_url_var.get().strip()
+        output_dir = self.output_dir_var.get().strip()
+        email = self.email_var.get().strip()
+        password = self.password_var.get()
+        save_as_pdf = self.save_as_pdf_var.get()
+        handle_cookies = self.handle_cookies_var.get()
+        start_page = self.start_page_var.get()
+        max_pages = self.max_pages_var.get()
+
+        if not search_url:
+            messagebox.showerror("Error", "Please enter a search URL.")
+            return
+
+        if not output_dir:
+            messagebox.showerror("Error", "Please select an output directory.")
+            return
+
+        if start_page < 1:
+            messagebox.showerror("Error", "Start page must be at least 1.")
+            return
+
+        # Disable start button, enable stop button
+        self.start_button.configure(state=tk.DISABLED)
+        self.stop_button.configure(state=tk.NORMAL)
+
+        # Clear log
+        self.log_text.configure(state="normal")
+        self.log_text.delete(1.0, tk.END)
+        self.log_text.configure(state="disabled")
+
+        # Reset progress
+        self.update_progress(0, 0)
+        self.stats_var.set("")
+        self.update_status("Starting...")
+
+        # Start scraping in a separate thread
+        self.thread = threading.Thread(
+            target=self.scraper.start_scraping,
+            args=(search_url, output_dir, email, password, save_as_pdf, handle_cookies, max_pages, start_page),
+            kwargs={'progress_callback': self.update_progress, 'status_callback': self.update_status}
+        )
+        self.thread.daemon = True
+        self.thread.start()
+
+        # Schedule periodic check to re-enable button when thread completes
+        self.root.after(1000, self.check_thread)
+
+    def stop_scraping(self):
+        if self.scraper:
+            self.scraper.stop_scraping()
+        self.stop_button.configure(state=tk.DISABLED)
+
+    def check_thread(self):
+        if self.thread and not self.thread.is_alive():
+            self.start_button.configure(state=tk.NORMAL)
+            self.stop_button.configure(state=tk.DISABLED)
+        else:
+            self.root.after(1000, self.check_thread)
 
 
 if __name__ == "__main__":
-    # Check if FlareSolverr is running
-    try:
-        response = requests.post(FLARESOLVERR_URL, json={"cmd": "sessions.list"})
-        response.raise_for_status()
-        print("FlareSolverr is running")
-    except Exception as e:
-        print(f"Error: FlareSolverr is not running or not accessible at {FLARESOLVERR_URL}")
-        print("Please make sure FlareSolverr is installed and running before using this script")
-        print("Installation instructions: https://github.com/FlareSolverr/FlareSolverr")
-        exit(1)
+    # Check if pdfkit/wkhtmltopdf is installed
+    if not shutil.which('wkhtmltopdf'):
+        print("Warning: wkhtmltopdf not found in PATH.")
+        print("Install wkhtmltopdf from: https://wkhtmltopdf.org/downloads.html")
 
-    # Install Playwright if not already installed
-    try:
-        from playwright.sync_api import sync_playwright
-
-        print("Playwright is already installed.")
-    except ImportError:
-        print("Playwright is not installed. Installing now...")
-        import subprocess
-
-        subprocess.check_call(["pip", "install", "playwright"])
-        subprocess.check_call(["playwright", "install", "chromium"])
-        print("Playwright installed successfully.")
-
-    # Start scraping
-    scrape_lexology_articles()
+    root = tk.Tk()
+    app = LexologyScraperGUI(root)
+    root.mainloop()
