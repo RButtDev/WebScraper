@@ -1,0 +1,1037 @@
+//+------------------------------------------------------------------+
+//|                                              CM_Strength_Statistical.mq5 |
+//|                        Copyright 2015, MetaQuotes Software Corp. |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2015, MetaQuotes Software Corp."
+#property link      "https://www.mql5.com"
+#property version   "1.00"
+#property indicator_chart_window
+#property indicator_buffers 1
+#property indicator_plots 1
+#property indicator_type1 DRAW_NONE
+#include <Trade\Trade.mqh>
+
+// Indicator buffer
+double dummy_buffer[];
+
+#define BullColor clrLime
+#define BearColor clrRed
+#define BaseColor clrWhite
+
+#define NONE 0
+#define DOWN -1
+#define UP 1
+
+input int                        x_offset                   = 20;     // Distance from right edge
+input int                        y_offset                   = 20;     // Distance from top edge
+input color                      TableBackgroundColor        = clrWhite; // Table background color
+input color                      TableBorderColor            = clrBlack;  // Table border color
+input int                        TableWidth                  = 200;    // Table width
+input int                        TableHeight                 = 190;    // Table height
+input bool                       MoveToTopRight              = true;   // Position in top right corner
+input bool                       ShowTopPairs                = true;   // Show top 10 pairs to trade
+input int                        TopPairsTableWidth          = 250;    // Top pairs table width
+input int                        TopPairsTableHeight         = 250;    // Top pairs table height (increased for 10 pairs)
+input int                        TopPairsOffset              = 20;     // Distance between tables
+input int                        TablePadding                = 15;     // Padding around tables
+input bool                       UseDefaultPairs            = true;              // Use the default 28 pairs
+input string                     OwnPairs                   = "";                // Comma seperated own pair list
+input bool                       UseStatisticalRanking       = true;   // Use statistical ranking instead of simple strength
+input int                        LookbackDays               = 30;      // Days to look back for statistical analysis
+input bool                       ShowDetailedStats           = false;  // Show detailed statistics table
+input int                        DetailedStatsWidth          = 350;    // Detailed stats table width
+input int                        DetailedStatsHeight         = 300;    // Detailed stats table height
+input int                        DetailedStatsOffset         = 20;     // Offset from top pairs table
+
+string DefaultPairs[] = {"AUDCAD","AUDCHF","AUDJPY","AUDNZD","AUDUSD","CADCHF","CADJPY","CHFJPY","EURAUD","EURCAD","EURCHF","EURGBP","EURJPY","EURNZD","EURUSD","GBPAUD","GBPCAD","GBPCHF","GBPJPY","GBPNZD","GBPUSD","NZDCAD","NZDCHF","NZDJPY","NZDUSD","USDCAD","USDCHF","USDJPY"};
+string TradePairs[];
+string curr[8] = {"USD","EUR","GBP","JPY","AUD","NZD","CAD","CHF"};
+string EUR[7] = {"EURAUD","EURCAD","EURCHF","EURGBP","EURJPY","EURNZD","EURUSD"};
+string GBP[6] = {"GBPAUD","GBPCAD","GBPCHF","GBPJPY","GBPNZD","GBPUSD"};
+string GBP_R[1] = {"EURGBP"};
+string CHF[1] = {"CHFJPY"};
+string CHF_R[6] = {"AUDCHF","CADCHF","EURCHF","GBPCHF","NZDCHF","USDCHF"};
+string USD[3] = {"USDCAD","USDCHF","USDJPY"};
+string USD_R[4] = {"AUDUSD","EURUSD","GBPUSD","NZDUSD"};
+string CAD[2] = {"CADCHF","CADJPY"};
+string CAD_R[5] = {"AUDCAD","EURCAD","GBPCAD","NZDCAD","USDCAD"};
+string NZD[4] = {"NZDCAD","NZDCHF","NZDJPY","NZDUSD"};
+string NZD_R[3] = {"AUDNZD","EURNZD","GBPNZD"};
+string AUD[5] = {"AUDCAD","AUDCHF","AUDJPY","AUDNZD","AUDUSD"};
+string AUD_R[2] = {"EURAUD","GBPAUD"};
+string JPY_R[7] = {"AUDJPY","CADJPY","CHFJPY","EURJPY","GBPJPY","NZDJPY","USDJPY"};
+
+double currstrength[8];
+double prevstrength[8];
+string postfix;
+
+struct pairinf {
+   double PairPip;
+   int pipsfactor;
+   double Pips;
+   double PipsSig;
+   double Pipsprev;
+   double Spread;
+   double point;
+   int lastSignal;
+   int    base;
+   int    quote;   
+}; pairinf pairinfo[];
+
+struct currency {
+   string            curr;
+   double            strength;
+   double            prevstrength;
+   double            crs;
+   int               sync;
+   datetime          lastbar;
+}; currency currencies[8];
+
+struct signal { 
+   string symbol;
+   double range;
+   double range1;
+   double ratio;
+   double ratio1;
+   double bidratio;
+   double fact;
+   double strength;
+   double strength1;
+   double strength2;
+   double calc;
+   double strength3;
+   double strength4;
+   double strength5;
+   double strength6;
+   double strength7;
+   double strength8;
+   double strength_Gap;
+   double hi;
+   double lo;
+   double prevratio;   
+   double prevbid;   
+   int    shift;
+   double open;
+   double close;
+   double bid;
+   double point;   
+   double Signalperc;   
+   double SigRatio;
+   double SigRelStr;
+   double SigBSRatio;    
+   double SigCRS;
+   double SigGap;
+   double SigGapPrev;
+   double SigRatioPrev;
+   double Signalrsi;
+}; signal signals[];
+
+struct PairStrength {
+   string symbol;
+   double strength_diff;
+   string base_curr;
+   string quote_curr;
+   double base_strength;
+   double quote_strength;
+   string direction;
+};
+
+// New structure for statistical analysis
+struct PairPerformance {
+   string symbol;
+   string direction;
+   double strengthDiff;
+   int totalSignals;
+   int successfulSignals;
+   double successRate;
+   double averageProfit;
+   double averageLoss;
+   double profitFactor;
+   double score;  // Combined score for ranking
+}; PairPerformance pairPerformance[];
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   // Initialize indicator buffers
+   ArraySetAsSeries(dummy_buffer, true);
+   SetIndexBuffer(0, dummy_buffer, INDICATOR_DATA);
+   
+   postfix = StringSubstr(_Symbol, 6);
+   
+   if (UseDefaultPairs == true)
+      ArrayCopy(TradePairs, DefaultPairs);
+   else
+      StringSplit(OwnPairs, ',', TradePairs);
+   
+   for (int i = 0; i < 8; i++)
+      currencies[i].curr = curr[i]; 
+   
+   if (ArraySize(TradePairs) <= 0) {
+      Print("No pairs to trade");
+      return(INIT_FAILED);
+   }
+   
+   ArrayResize(pairinfo, ArraySize(TradePairs));
+          
+   for(int i = 0; i < ArraySize(TradePairs); i++) {
+      TradePairs[i] = TradePairs[i] + postfix;    
+
+      string currBase = StringSubstr(TradePairs[i], 0, 3);
+      string currQuote = StringSubstr(TradePairs[i], 3, 3);
+      
+      for (int j = 0; j < 8; j++) {
+         if (currBase == curr[j]) pairinfo[i].base = j;
+         if (currQuote == curr[j]) pairinfo[i].quote = j;
+      }
+   
+      if ((int)SymbolInfoInteger(TradePairs[i], SYMBOL_DIGITS) == 4 || (int)SymbolInfoInteger(TradePairs[i], SYMBOL_DIGITS) == 2) {
+         pairinfo[i].PairPip = SymbolInfoDouble(TradePairs[i], SYMBOL_POINT);
+         pairinfo[i].pipsfactor = 1;
+      } else { 
+         pairinfo[i].PairPip = SymbolInfoDouble(TradePairs[i], SYMBOL_POINT) * 10;
+         pairinfo[i].pipsfactor = 10;
+      }
+   }
+
+   EventSetTimer(1);
+
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+   return(rates_total);
+}
+  
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   EventKillTimer();
+   ObjectsDeleteAll(0, 0, OBJ_LABEL);
+   ObjectsDeleteAll(0, 0, OBJ_RECTANGLE_LABEL);
+}
+
+//+------------------------------------------------------------------+
+//| Timer function                                                   |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+   GetSignals();
+   displayMeter();
+   
+   if (ShowTopPairs) {
+      if (UseStatisticalRanking)
+         displayStatisticalTopPairs();
+      else
+         displayTopPairs();
+   }
+   
+   // Display detailed statistics
+   displayDetailedStatistics();
+}
+
+//+------------------------------------------------------------------+
+//| ChartEvent function                                              |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id,
+                  const long &lparam,
+                  const double &dparam,
+                  const string &sparam)
+{
+}
+
+//+------------------------------------------------------------------+ 
+void displayMeter() 
+{
+   double arrt[8][3];
+   int arr2, arr3;
+   arrt[0][0] = currency_strength(curr[0]); arrt[1][0] = currency_strength(curr[1]); arrt[2][0] = currency_strength(curr[2]);
+   arrt[3][0] = currency_strength(curr[3]); arrt[4][0] = currency_strength(curr[4]); arrt[5][0] = currency_strength(curr[5]);
+   arrt[6][0] = currency_strength(curr[6]); arrt[7][0] = currency_strength(curr[7]);
+   arrt[0][2] = old_currency_strength(curr[0]); arrt[1][2] = old_currency_strength(curr[1]); arrt[2][2] = old_currency_strength(curr[2]);
+   arrt[3][2] = old_currency_strength(curr[3]); arrt[4][2] = old_currency_strength(curr[4]); arrt[5][2] = old_currency_strength(curr[5]);
+   arrt[6][2] = old_currency_strength(curr[6]); arrt[7][2] = old_currency_strength(curr[7]);
+   arrt[0][1] = 0; arrt[1][1] = 1; arrt[2][1] = 2; arrt[3][1] = 3; arrt[4][1] = 4; arrt[5][1] = 5; arrt[6][1] = 6; arrt[7][1] = 7;
+   // Create a multidimensional array for sorting
+   double temp_array[8][3];
+   
+   for(int i = 0; i < 8; i++) {
+      temp_array[i][0] = arrt[i][0]; // strength value
+      temp_array[i][1] = arrt[i][1]; // index
+      temp_array[i][2] = arrt[i][2]; // previous strength
+   }
+   
+   // Sort manually in descending order by strength value
+   for(int i = 0; i < 7; i++) {
+      for(int j = i + 1; j < 8; j++) {
+         if(temp_array[i][0] < temp_array[j][0]) {
+            // Swap rows
+            double temp0 = temp_array[i][0];
+            double temp1 = temp_array[i][1];
+            double temp2 = temp_array[i][2];
+            
+            temp_array[i][0] = temp_array[j][0];
+            temp_array[i][1] = temp_array[j][1];
+            temp_array[i][2] = temp_array[j][2];
+            
+            temp_array[j][0] = temp0;
+            temp_array[j][1] = temp1;
+            temp_array[j][2] = temp2;
+         }
+      }
+   }
+   
+   // Copy back to arrt
+   for(int i = 0; i < 8; i++) {
+      arrt[i][0] = temp_array[i][0];
+      arrt[i][1] = temp_array[i][1];
+      arrt[i][2] = temp_array[i][2];
+   }
+     
+   for (int m = 0; m < 8; m++) {
+      arr2 = (int)arrt[m][1];
+      arr3 = (int)arrt[m][2];
+      currstrength[m] = arrt[m][0];
+      prevstrength[m] = arrt[m][2]; 
+   
+      SetTextTopRight(curr[arr2]+"pos", IntegerToString(m+1)+".", x_offset + 35, y_offset + 55 + (m*16), clrBlack, 10);
+      SetTextTopRight(curr[arr2]+"curr", curr[arr2], x_offset + 75, y_offset + 55 + (m*16), clrBlack, 10);
+      SetTextTopRight(curr[arr2]+"currdig", DoubleToString(arrt[m][0], 1), x_offset + 115, y_offset + 55 + (m*16), clrBlack, 10);
+        
+      if(currstrength[m] > prevstrength[m]) {
+         SetObjTextTopRight("Sdir"+IntegerToString(m), CharToString(233), x_offset + 155, y_offset + 55 + (m*16), clrLime, 10);
+      }
+      else if(currstrength[m] < prevstrength[m]) {
+         SetObjTextTopRight("Sdir"+IntegerToString(m), CharToString(234), x_offset + 155, y_offset + 55 + (m*16), clrRed, 10);
+      }
+      else {
+         SetObjTextTopRight("Sdir"+IntegerToString(m), CharToString(243), x_offset + 155, y_offset + 55 + (m*16), clrPink, 10);
+      }
+   }
+   
+   ChartRedraw(); 
+}
+
+color color_for_profit(double total) 
+{
+   if(total < 2.0)
+      return (clrRed);
+   if(total <= 3.0)
+      return (clrOrangeRed);
+   if(total > 7.0)
+      return (clrLime);
+   if(total > 6.0)
+      return (clrGreen);
+   if(total > 5.0)
+      return (clrSandyBrown);
+   if(total <= 5.0)
+      return (clrPink);       
+   return(clrSteelBlue);
+}
+
+double currency_strength(string pair) 
+{
+   int fact;
+   string sym;
+   double range;
+   double ratio;
+   double strength = 0;
+   int cnt1 = 0;
+   
+   for (int x = 0; x < ArraySize(TradePairs); x++) {
+      fact = 0;
+      sym = TradePairs[x];
+      if (pair == StringSubstr(sym, 0, 3) || pair == StringSubstr(sym, 3, 3)) {
+         double high_price_cs = iHigh(sym, PERIOD_D1, 0);
+         double low_price_cs = iLow(sym, PERIOD_D1, 0);
+         range = high_price_cs - low_price_cs;
+         if (range != 0.0) {
+            double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+            ratio = 100.0 * ((bid - low_price_cs) / range);
+            if (ratio > 3.0)  fact = 1;
+            if (ratio > 10.0) fact = 2;
+            if (ratio > 25.0) fact = 3;
+            if (ratio > 40.0) fact = 4;
+            if (ratio > 50.0) fact = 5;
+            if (ratio > 60.0) fact = 6;
+            if (ratio > 75.0) fact = 7;
+            if (ratio > 90.0) fact = 8;
+            if (ratio > 97.0) fact = 9;
+            cnt1++;
+            if (pair == StringSubstr(sym, 3, 3)) fact = 9 - fact;
+            strength += fact;
+         }
+      }
+   }
+   if(cnt1 != 0) strength /= cnt1;
+   return (strength);
+}
+
+//-----------------------------------------------------------------------------------+
+double old_currency_strength(string pair) 
+{
+   int fact;
+   string sym;
+   double range;
+   double ratio;
+   double strength = 0;
+   int cnt1 = 0;
+
+   for(int x = 0; x < ArraySize(TradePairs); x++) 
+   {
+      fact = 0;
+      sym = TradePairs[x];
+      
+      // Get the bar from 30 minutes ago
+      datetime time_30_min_ago = TimeCurrent() - 1800;
+      int bar = iBarShift(sym, PERIOD_M1, time_30_min_ago);
+      
+      // Get the close price from that bar
+      double prevbid = 0;
+      if (bar >= 0) {
+         double close_buffer[];
+         if (CopyClose(sym, PERIOD_M1, bar, 1, close_buffer) > 0) {
+            prevbid = close_buffer[0];
+         }
+      }
+      
+      if(pair == StringSubstr(sym, 0, 3) || pair == StringSubstr(sym, 3, 3)) 
+      {
+         double high_price = iHigh(sym, PERIOD_D1, 0);
+         double low_price = iLow(sym, PERIOD_D1, 0);
+         range = high_price - low_price;
+         if(range != 0.0 && prevbid != 0) 
+         {
+            double low_price = iLow(sym, PERIOD_D1, 0);
+            ratio = 100.0 * ((prevbid - low_price) / range);
+
+            if(ratio > 3.0)  fact = 1;
+            if(ratio > 10.0) fact = 2;
+            if(ratio > 25.0) fact = 3;
+            if(ratio > 40.0) fact = 4;
+            if(ratio > 50.0) fact = 5;
+            if(ratio > 60.0) fact = 6;
+            if(ratio > 75.0) fact = 7;
+            if(ratio > 90.0) fact = 8;
+            if(ratio > 97.0) fact = 9;
+            
+            cnt1++;
+
+            if(pair == StringSubstr(sym, 3, 3))
+               fact = 9 - fact;
+
+            strength += fact;
+         }
+      }
+   }
+   if(cnt1 != 0)
+      strength /= cnt1;
+
+   return (strength);
+}
+
+// Function to calculate historical currency strength (for a specific day in the past)
+double HistoricalCurrencyStrength(string curr, int daysAgo) 
+{
+   int fact;
+   string sym;
+   double range;
+   double ratio;
+   double strength = 0;
+   int cnt1 = 0;
+   
+   for (int x = 0; x < ArraySize(TradePairs); x++) {
+      fact = 0;
+      sym = TradePairs[x];
+      if (curr == StringSubstr(sym, 0, 3) || curr == StringSubstr(sym, 3, 3)) {
+         double high_price = iHigh(sym, PERIOD_D1, daysAgo);
+         double low_price = iLow(sym, PERIOD_D1, daysAgo);
+         range = high_price - low_price;
+         if (range != 0.0) {
+            double close_price = iClose(sym, PERIOD_D1, daysAgo);
+            ratio = 100.0 * ((close_price - low_price) / range);
+            if (ratio > 3.0)  fact = 1;
+            if (ratio > 10.0) fact = 2;
+            if (ratio > 25.0) fact = 3;
+            if (ratio > 40.0) fact = 4;
+            if (ratio > 50.0) fact = 5;
+            if (ratio > 60.0) fact = 6;
+            if (ratio > 75.0) fact = 7;
+            if (ratio > 90.0) fact = 8;
+            if (ratio > 97.0) fact = 9;
+            cnt1++;
+            if (curr == StringSubstr(sym, 3, 3)) fact = 9 - fact;
+            strength += fact;
+         }
+      }
+   }
+   if(cnt1 != 0) strength /= cnt1;
+   return (strength);
+}
+
+//-----------------------------------------------------------------------------------------------+ 
+void GetSignals() 
+{
+   int cnt = 0;
+   ArrayResize(signals, ArraySize(TradePairs));
+   
+   for (int i = 0; i < ArraySize(signals); i++) {
+      signals[i].symbol = TradePairs[i]; 
+      signals[i].point = SymbolInfoDouble(signals[i].symbol, SYMBOL_POINT);
+      
+      // Get daily bar data
+      MqlRates daily_rates[];
+      if (CopyRates(signals[i].symbol, PERIOD_D1, 0, 1, daily_rates) > 0) {
+         signals[i].open = daily_rates[0].open;
+         signals[i].close = daily_rates[0].close;
+      }
+      
+      signals[i].hi = iHigh(signals[i].symbol, PERIOD_D1, 0);
+      signals[i].lo = iLow(signals[i].symbol, PERIOD_D1, 0);
+      signals[i].bid = SymbolInfoDouble(signals[i].symbol, SYMBOL_BID);
+      signals[i].range = (signals[i].hi - signals[i].lo);
+      
+      // Find bar from 30 minutes ago
+      datetime time_30_min_ago = TimeCurrent() - 1800;
+      signals[i].shift = iBarShift(signals[i].symbol, PERIOD_M1, time_30_min_ago);
+      
+      // Get previous bid price
+      if (signals[i].shift >= 0) {
+         double close_buffer[];
+         if (CopyClose(signals[i].symbol, PERIOD_M1, signals[i].shift, 1, close_buffer) > 0) {
+            signals[i].prevbid = close_buffer[0];
+         }
+      }
+                 
+      if(signals[i].range != 0 && signals[i].shift >= 0) {            
+         signals[i].ratio = MathMin(((signals[i].bid - signals[i].lo) / signals[i].range * 100), 100);
+         signals[i].prevratio = MathMin(((signals[i].prevbid - signals[i].lo) / signals[i].range * 100), 100);     
+           
+         for (int j = 0; j < 8; j++) {
+            if(signals[i].ratio <= 3.0) signals[i].fact = 0;
+            if(signals[i].ratio > 3.0)  signals[i].fact = 1;
+            if(signals[i].ratio > 10.0) signals[i].fact = 2;
+            if(signals[i].ratio > 25.0) signals[i].fact = 3;
+            if(signals[i].ratio > 40.0) signals[i].fact = 4;
+            if(signals[i].ratio > 50.0) signals[i].fact = 5;
+            if(signals[i].ratio > 60.0) signals[i].fact = 6;
+            if(signals[i].ratio > 75.0) signals[i].fact = 7;
+            if(signals[i].ratio > 90.0) signals[i].fact = 8;
+            if(signals[i].ratio > 97.0) signals[i].fact = 9;
+            cnt++;
+           
+            if(curr[j] == StringSubstr(signals[i].symbol, 3, 3))
+               signals[i].fact = 9 - signals[i].fact;
+
+            if(curr[j] == StringSubstr(signals[i].symbol, 0, 3)) {
+               signals[i].strength1 = signals[i].fact;
+            } else {
+               if(curr[j] == StringSubstr(signals[i].symbol, 3, 3))
+                  signals[i].strength2 = signals[i].fact;
+            }
+
+            signals[i].calc = signals[i].strength1 - signals[i].strength2;
+            
+            signals[i].strength = currency_strength(curr[j]);
+
+            if(curr[j] == StringSubstr(signals[i].symbol, 0, 3)) {
+               signals[i].strength3 = signals[i].strength;
+            } else {
+               if(curr[j] == StringSubstr(signals[i].symbol, 3, 3))
+                  signals[i].strength4 = signals[i].strength;
+            }
+            signals[i].strength5 = (signals[i].strength3 - signals[i].strength4);
+            
+            signals[i].strength = old_currency_strength(curr[j]);
+
+            if(curr[j] == StringSubstr(signals[i].symbol, 0, 3)) {
+               signals[i].strength6 = signals[i].strength;
+            } else {
+               if(curr[j] == StringSubstr(signals[i].symbol, 3, 3))
+                  signals[i].strength7 = signals[i].strength;
+            }
+            signals[i].strength8 = (signals[i].strength6 - signals[i].strength7);     
+            signals[i].strength_Gap = signals[i].strength5 - signals[i].strength8;
+            
+            if(signals[i].ratio > signals[i].prevratio) {
+               signals[i].SigRatioPrev = UP;
+            } else {
+               if(signals[i].ratio < signals[i].prevratio)
+                  signals[i].SigRatioPrev = DOWN;
+            }      
+                        
+            if(signals[i].strength5 > signals[i].strength8) {
+               signals[i].SigGapPrev = UP;
+            } else {
+               if(signals[i].strength5 < signals[i].strength8)      
+                  signals[i].SigGapPrev = DOWN;
+            }          
+         }
+      }
+   }    
+}
+
+//+------------------------------------------------------------------+
+// Calculate and display top 10 pairs with highest strength difference
+//+------------------------------------------------------------------+
+void displayTopPairs()
+{
+   // Create array for pair strength data
+   PairStrength pairs_strength[];
+   ArrayResize(pairs_strength, ArraySize(TradePairs));
+   
+   // Calculate currency strengths first
+   double currency_strengths[8];
+   for (int i = 0; i < 8; i++) {
+      currency_strengths[i] = currency_strength(curr[i]);
+   }
+   // Calculate strength difference for each pair
+   for (int i = 0; i < ArraySize(TradePairs); i++) {
+      pairs_strength[i].symbol = TradePairs[i];
+      
+      // Get base and quote currencies
+      pairs_strength[i].base_curr = StringSubstr(TradePairs[i], 0, 3);
+      pairs_strength[i].quote_curr = StringSubstr(TradePairs[i], 3, 3);
+      
+      // Find strength for each currency
+      for (int j = 0; j < 8; j++) {
+         if (curr[j] == pairs_strength[i].base_curr)
+            pairs_strength[i].base_strength = currency_strengths[j];
+         
+         if (curr[j] == pairs_strength[i].quote_curr)
+            pairs_strength[i].quote_strength = currency_strengths[j];
+      }
+      
+      // Calculate the strength difference
+      pairs_strength[i].strength_diff = pairs_strength[i].base_strength - pairs_strength[i].quote_strength;
+      
+      // Determine trade direction
+      if (pairs_strength[i].strength_diff > 0) {
+         pairs_strength[i].direction = "BUY";
+      } else {
+         pairs_strength[i].direction = "SELL";
+      }
+   }
+   
+   // Sort pairs by absolute strength difference
+   for (int i = 0; i < ArraySize(pairs_strength) - 1; i++) {
+      for (int j = i + 1; j < ArraySize(pairs_strength); j++) {
+         if (MathAbs(pairs_strength[i].strength_diff) < MathAbs(pairs_strength[j].strength_diff)) {
+            // Swap elements
+            PairStrength temp = pairs_strength[i];
+            pairs_strength[i] = pairs_strength[j];
+            pairs_strength[j] = temp;
+         }
+      }
+   }
+   
+   // Create background for top pairs table with white background
+   string bgName = "TopPairsBG";
+   if(ObjectFind(0, bgName) < 0)
+      ObjectCreate(0, bgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   
+   int corner = MoveToTopRight ? CORNER_RIGHT_UPPER : CORNER_LEFT_UPPER;
+   int topTable_y = y_offset + TableHeight + TopPairsOffset;
+   
+   ObjectSetInteger(0, bgName, OBJPROP_CORNER, corner);
+   ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, x_offset - TablePadding);
+   ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, topTable_y - TablePadding);
+   ObjectSetInteger(0, bgName, OBJPROP_XSIZE, TopPairsTableWidth + TablePadding*2);
+   ObjectSetInteger(0, bgName, OBJPROP_YSIZE, TopPairsTableHeight + TablePadding*2); 
+   ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, clrWhite);
+   ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, bgName, OBJPROP_COLOR, TableBorderColor);
+   ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, TableBackgroundColor);
+   ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, bgName, OBJPROP_COLOR, TableBorderColor);
+   ObjectSetInteger(0, bgName, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, bgName, OBJPROP_BACK, false);
+   ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, bgName, OBJPROP_SELECTED, false);
+   ObjectSetInteger(0, bgName, OBJPROP_HIDDEN, false);
+   ObjectSetInteger(0, bgName, OBJPROP_ZORDER, 0);
+   
+   // Add headers for top pairs table
+   SetTextTopRight("TopPairsHeader", "TOP 10 PAIRS", x_offset + TopPairsTableWidth/2 - 15, topTable_y + 15, clrNavy, 10, true);
+   SetTextTopRight("DirectionHeader", "DIRECTION", x_offset + 50, topTable_y + 35, clrBlack, 9, true);
+   SetTextTopRight("DiffHeader", "STRENGTH", x_offset + 120, topTable_y + 35, clrBlack, 9, true);
+   SetTextTopRight("PairHeader", "PAIR", x_offset + 190, topTable_y + 35, clrBlack, 9, true);
+   
+   // Add separator line
+   string lineName = "TopPairsSeparator";
+   if(ObjectFind(0, lineName) < 0)
+      ObjectCreate(0, lineName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   
+   ObjectSetInteger(0, lineName, OBJPROP_CORNER, corner);
+   ObjectSetInteger(0, lineName, OBJPROP_XDISTANCE, x_offset + 10);
+   ObjectSetInteger(0, lineName, OBJPROP_YDISTANCE, topTable_y + 38);
+   ObjectSetInteger(0, lineName, OBJPROP_XSIZE, TopPairsTableWidth - 20);
+   ObjectSetInteger(0, lineName, OBJPROP_YSIZE, 1);
+   ObjectSetInteger(0, lineName, OBJPROP_BGCOLOR, clrBlack);
+   ObjectSetInteger(0, lineName, OBJPROP_BACK, false);
+   
+   // Display top 10 pairs (or less if we have fewer pairs)
+   int display_count = MathMin(10, ArraySize(pairs_strength));
+   
+   for (int i = 0; i < display_count; i++) {
+      color dir_color = pairs_strength[i].strength_diff > 0 ? clrLime : clrRed;
+      string abs_diff = DoubleToString(MathAbs(pairs_strength[i].strength_diff), 1); // Declare once here
+      
+      // Clean the symbol name (remove postfix)
+      string clean_symbol = StringSubstr(pairs_strength[i].symbol, 0, 6);
+      
+      // Determine color for direction text
+      color dir_text_color = pairs_strength[i].strength_diff > 0 ? clrLime : clrRed;
+      
+      SetTextTopRight("Dir"+IntegerToString(i), pairs_strength[i].direction, x_offset + 50, topTable_y + 55 + (i*16), dir_text_color, 10);
+      SetTextTopRight("Diff"+IntegerToString(i), abs_diff, x_offset + 120, topTable_y + 55 + (i*16), clrBlack, 10);
+      SetTextTopRight("Pair"+IntegerToString(i), clean_symbol, x_offset + 190, topTable_y + 55 + (i*16), clrBlack, 10);
+   }
+}
+
+// Function to analyze historical performance of currency strength signals
+void AnalyzeHistoricalPerformance(int lookbackDays = 30)
+{
+   ArrayResize(pairPerformance, ArraySize(TradePairs));
+   
+   // Initialize the performance array
+   for (int i = 0; i < ArraySize(TradePairs); i++) {
+      pairPerformance[i].symbol = TradePairs[i];
+      pairPerformance[i].totalSignals = 0;
+      pairPerformance[i].successfulSignals = 0;
+      pairPerformance[i].averageProfit = 0;
+      pairPerformance[i].averageLoss = 0;
+      
+      double totalProfit = 0;
+      double totalLoss = 0;
+      int profitCount = 0;
+      int lossCount = 0;
+      
+      // Calculate current strength difference (for current signal)
+      string baseCurr = StringSubstr(TradePairs[i], 0, 3);
+      string quoteCurr = StringSubstr(TradePairs[i], 3, 3);
+      double baseStrength = currency_strength(baseCurr);
+      double quoteStrength = currency_strength(quoteCurr);
+      double currentDiff = baseStrength - quoteStrength;
+      
+      pairPerformance[i].strengthDiff = MathAbs(currentDiff);
+      pairPerformance[i].direction = currentDiff > 0 ? "BUY" : "SELL";
+      
+      // Analyze historical performance
+      for (int day = 1; day <= lookbackDays; day++) {
+         // Get historical currency strengths
+         double baseStrengthHist = HistoricalCurrencyStrength(baseCurr, day);
+         double quoteStrengthHist = HistoricalCurrencyStrength(quoteCurr, day);
+         double strengthDiffHist = baseStrengthHist - quoteStrengthHist;
+         
+         // Determine historical signal
+         string historicalDirection = strengthDiffHist > 0 ? "BUY" : "SELL";
+         
+         // Check if the signal would have been profitable
+         // Get current day's open and next day's close
+         double openPrice = iOpen(TradePairs[i], PERIOD_D1, day);
+         double nextClose = iClose(TradePairs[i], PERIOD_D1, day-1);
+         
+         // Calculate profit/loss in pips
+         double pipValue = pairinfo[i].PairPip;
+         double pips = 0;
+         
+         if (historicalDirection == "BUY") {
+            pips = (nextClose - openPrice) / pipValue;
+         } else {
+            pips = (openPrice - nextClose) / pipValue;
+         }
+         
+         bool isProfit = (pips > 0);
+         
+         pairPerformance[i].totalSignals++;
+         
+         if (isProfit) {
+            pairPerformance[i].successfulSignals++;
+            totalProfit += pips;
+            profitCount++;
+         } else {
+            totalLoss += MathAbs(pips);
+            lossCount++;
+         }
+      }
+      
+      // Calculate statistics
+      if (pairPerformance[i].totalSignals > 0) {
+         pairPerformance[i].successRate = (double)pairPerformance[i].successfulSignals / pairPerformance[i].totalSignals * 100;
+      }
+      
+      if (profitCount > 0) {
+         pairPerformance[i].averageProfit = totalProfit / profitCount;
+      }
+      
+      if (lossCount > 0) {
+         pairPerformance[i].averageLoss = totalLoss / lossCount;
+      }
+      
+      if (pairPerformance[i].averageLoss > 0) {
+         pairPerformance[i].profitFactor = pairPerformance[i].averageProfit / pairPerformance[i].averageLoss;
+      } else if (pairPerformance[i].averageProfit > 0) {
+         pairPerformance[i].profitFactor = 100; // High value when no losses
+      }
+      
+      // Calculate combined score (weighted formula)
+      // 40% success rate, 30% profit factor, 30% current strength difference
+      pairPerformance[i].score = 
+         (pairPerformance[i].successRate * 0.4) +
+         (MathMin(pairPerformance[i].profitFactor, 3) * 33.3 * 0.3) +
+         (pairPerformance[i].strengthDiff / 9.0 * 100 * 0.3);
+   }
+   
+   // Sort pairs by score in descending order
+   for (int i = 0; i < ArraySize(pairPerformance) - 1; i++) {
+      for (int j = i + 1; j < ArraySize(pairPerformance); j++) {
+         if (pairPerformance[i].score < pairPerformance[j].score) {
+            // Swap elements
+            PairPerformance temp = pairPerformance[i];
+            pairPerformance[i] = pairPerformance[j];
+            pairPerformance[j] = temp;
+         }
+      }
+   }
+}
+
+// Function to display top pairs based on statistical analysis
+void displayStatisticalTopPairs()
+{
+   // Analyze historical performance first
+   AnalyzeHistoricalPerformance(LookbackDays);
+   
+   // Create background for top pairs table with white background
+   string bgName = "TopPairsBG";
+   if(ObjectFind(0, bgName) < 0)
+      ObjectCreate(0, bgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   
+   int corner = MoveToTopRight ? CORNER_RIGHT_UPPER : CORNER_LEFT_UPPER;
+   int topTable_y = y_offset + TableHeight + TopPairsOffset;
+   
+   ObjectSetInteger(0, bgName, OBJPROP_CORNER, corner);
+   ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, x_offset - TablePadding);
+   ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, topTable_y - TablePadding);
+   ObjectSetInteger(0, bgName, OBJPROP_XSIZE, TopPairsTableWidth + TablePadding*2);
+   ObjectSetInteger(0, bgName, OBJPROP_YSIZE, TopPairsTableHeight + TablePadding*2); 
+   ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, clrWhite);
+   ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, bgName, OBJPROP_COLOR, TableBorderColor);
+   ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, TableBackgroundColor);
+   ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, bgName, OBJPROP_COLOR, TableBorderColor);
+   ObjectSetInteger(0, bgName, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, bgName, OBJPROP_BACK, false);
+   ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, bgName, OBJPROP_SELECTED, false);
+   ObjectSetInteger(0, bgName, OBJPROP_HIDDEN, false);
+   ObjectSetInteger(0, bgName, OBJPROP_ZORDER, 0);
+   
+   // Add headers for top pairs table
+   SetTextTopRight("TopPairsHeader", "TOP 10 PAIRS", x_offset + TopPairsTableWidth/2 - 15, topTable_y + 15, clrNavy, 10, true);
+   SetTextTopRight("DirectionHeader", "DIRECTION", x_offset + 50, topTable_y + 35, clrBlack, 9, true);
+   SetTextTopRight("ScoreHeader", "SCORE", x_offset + 120, topTable_y + 35, clrBlack, 9, true);
+   SetTextTopRight("PairHeader", "PAIR", x_offset + 190, topTable_y + 35, clrBlack, 9, true);
+   
+   // Add separator line
+   string lineName = "TopPairsSeparator";
+   if(ObjectFind(0, lineName) < 0)
+      ObjectCreate(0, lineName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   
+   ObjectSetInteger(0, lineName, OBJPROP_CORNER, corner);
+   ObjectSetInteger(0, lineName, OBJPROP_XDISTANCE, x_offset + 10);
+   ObjectSetInteger(0, lineName, OBJPROP_YDISTANCE, topTable_y + 38);
+   ObjectSetInteger(0, lineName, OBJPROP_XSIZE, TopPairsTableWidth - 20);
+   ObjectSetInteger(0, lineName, OBJPROP_YSIZE, 1);
+   ObjectSetInteger(0, lineName, OBJPROP_BGCOLOR, clrBlack);
+   ObjectSetInteger(0, lineName, OBJPROP_BACK, false);
+   
+   // Display top 10 pairs (or less if we have fewer pairs)
+   int display_count = MathMin(10, ArraySize(pairPerformance));
+   
+   for (int i = 0; i < display_count; i++) {
+      color dir_color = pairPerformance[i].direction == "BUY" ? clrLime : clrRed;
+      string score_str = DoubleToString(pairPerformance[i].score, 1);
+      
+      // Clean the symbol name (remove postfix)
+      string clean_symbol = StringSubstr(pairPerformance[i].symbol, 0, 6);
+      
+      SetTextTopRight("Dir"+IntegerToString(i), pairPerformance[i].direction, x_offset + 50, topTable_y + 55 + (i*16), dir_color, 10);
+      SetTextTopRight("Score"+IntegerToString(i), score_str, x_offset + 120, topTable_y + 55 + (i*16), clrBlack, 10);
+      SetTextTopRight("Pair"+IntegerToString(i), clean_symbol, x_offset + 190, topTable_y + 55 + (i*16), clrBlack, 10);
+   }
+}
+
+// Function to display detailed statistics
+void displayDetailedStatistics()
+{
+   if (!ShowDetailedStats) return;
+   
+   // Make sure we have performance data
+   if (ArraySize(pairPerformance) == 0) {
+      AnalyzeHistoricalPerformance(LookbackDays);
+   }
+   
+   // Create background for detailed stats table
+   string bgName = "DetailedStatsBG";
+   if(ObjectFind(0, bgName) < 0)
+      ObjectCreate(0, bgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   
+   int corner = MoveToTopRight ? CORNER_RIGHT_UPPER : CORNER_LEFT_UPPER;
+   int statsTable_y = y_offset + TableHeight + TopPairsOffset + TopPairsTableHeight + DetailedStatsOffset;
+   
+   ObjectSetInteger(0, bgName, OBJPROP_CORNER, corner);
+   ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, x_offset - TablePadding);
+   ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, statsTable_y - TablePadding);
+   ObjectSetInteger(0, bgName, OBJPROP_XSIZE, DetailedStatsWidth + TablePadding*2);
+   ObjectSetInteger(0, bgName, OBJPROP_YSIZE, DetailedStatsHeight + TablePadding*2); 
+   ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, TableBackgroundColor);
+   ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, bgName, OBJPROP_COLOR, TableBorderColor);
+   ObjectSetInteger(0, bgName, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, bgName, OBJPROP_BACK, false);
+   
+   // Add header
+   SetTextTopRight("StatsHeader", "DETAILED STATISTICS", x_offset + DetailedStatsWidth/2 - 20, statsTable_y + 15, clrNavy, 10, true);
+   
+   // Add column headers
+   SetTextTopRight("PairStatsHeader", "PAIR", x_offset + 40, statsTable_y + 35, clrBlack, 9, true);
+   SetTextTopRight("DirectionStatsHeader", "DIR", x_offset + 90, statsTable_y + 35, clrBlack, 9, true);
+   SetTextTopRight("WinRateHeader", "WIN%", x_offset + 120, statsTable_y + 35, clrBlack, 9, true);
+   SetTextTopRight("ProfitHeader", "AVG+", x_offset + 160, statsTable_y + 35, clrBlack, 9, true);
+   SetTextTopRight("LossHeader", "AVG-", x_offset + 200, statsTable_y + 35, clrBlack, 9, true);
+   SetTextTopRight("ProfFactorHeader", "P/F", x_offset + 240, statsTable_y + 35, clrBlack, 9, true);
+   SetTextTopRight("ScoreStatsHeader", "SCORE", x_offset + 280, statsTable_y + 35, clrBlack, 9, true);
+   SetTextTopRight("SignalsHeader", "SIGNALS", x_offset + 330, statsTable_y + 35, clrBlack, 9, true);
+   
+   // Add separator line
+   string lineName = "StatsTableSeparator";
+   if(ObjectFind(0, lineName) < 0)
+      ObjectCreate(0, lineName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   
+   ObjectSetInteger(0, lineName, OBJPROP_CORNER, corner);
+   ObjectSetInteger(0, lineName, OBJPROP_XDISTANCE, x_offset + 10);
+   ObjectSetInteger(0, lineName, OBJPROP_YDISTANCE, statsTable_y + 38);
+   ObjectSetInteger(0, lineName, OBJPROP_XSIZE, DetailedStatsWidth - 20);
+   ObjectSetInteger(0, lineName, OBJPROP_YSIZE, 1);
+   ObjectSetInteger(0, lineName, OBJPROP_BGCOLOR, clrBlack);
+   ObjectSetInteger(0, lineName, OBJPROP_BACK, false);
+   
+   // Display detailed statistics for each pair
+   int display_count = MathMin(10, ArraySize(pairPerformance)); // Show top 10 pairs
+   
+   for (int i = 0; i < display_count; i++) {
+      // Clean symbol name
+      string clean_symbol = StringSubstr(pairPerformance[i].symbol, 0, 6);
+      
+      // Direction color
+      color dir_color = pairPerformance[i].direction == "BUY" ? clrLime : clrRed;
+      
+      // Format numbers
+      string win_rate = DoubleToString(pairPerformance[i].successRate, 1) + "%";
+      string avg_profit = DoubleToString(pairPerformance[i].averageProfit, 1);
+      string avg_loss = DoubleToString(pairPerformance[i].averageLoss, 1);
+      string profit_factor = DoubleToString(pairPerformance[i].profitFactor, 2);
+      string score = DoubleToString(pairPerformance[i].score, 1);
+      string signals = IntegerToString(pairPerformance[i].totalSignals);
+      
+      // Display row
+      SetTextTopRight("StPair"+IntegerToString(i), clean_symbol, x_offset + 40, statsTable_y + 55 + (i*16), clrBlack, 9);
+      SetTextTopRight("StDir"+IntegerToString(i), pairPerformance[i].direction, x_offset + 90, statsTable_y + 55 + (i*16), dir_color, 9);
+      SetTextTopRight("StWin"+IntegerToString(i), win_rate, x_offset + 120, statsTable_y + 55 + (i*16), clrBlack, 9);
+      SetTextTopRight("StProfit"+IntegerToString(i), avg_profit, x_offset + 160, statsTable_y + 55 + (i*16), clrGreen, 9);
+      SetTextTopRight("StLoss"+IntegerToString(i), avg_loss, x_offset + 200, statsTable_y + 55 + (i*16), clrRed, 9);
+      SetTextTopRight("StPF"+IntegerToString(i), profit_factor, x_offset + 240, statsTable_y + 55 + (i*16), clrBlack, 9);
+      SetTextTopRight("StScore"+IntegerToString(i), score, x_offset + 280, statsTable_y + 55 + (i*16), clrBlack, 9);
+      SetTextTopRight("StSignals"+IntegerToString(i), signals, x_offset + 330, statsTable_y + 55 + (i*16), clrBlack, 9);
+   }
+}
+
+//+------------------------------------------------------------------+
+void SetText(string name, string text, int x, int y, color colour, int fontsize=12)
+{
+   if (ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, colour);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, fontsize);
+   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+} 
+  
+//+------------------------------------------------------------------+
+void SetObjText(string name, string charText, int x, int y, color colour, int fontsize=12)
+{
+   if(ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, fontsize);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, colour);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetString(0, name, OBJPROP_TEXT, charText);
+   ObjectSetString(0, name, OBJPROP_FONT, "Wingdings");
+}
+
+//+------------------------------------------------------------------+
+void SetObjTextTopRight(string name, string charText, int x, int y, color colour, int fontsize=12)
+{
+   if(ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+
+   int corner = MoveToTopRight ? CORNER_RIGHT_UPPER : CORNER_LEFT_UPPER;
+   
+   ObjectSetInteger(0, name, OBJPROP_CORNER, corner);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, fontsize);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, colour);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetString(0, name, OBJPROP_TEXT, charText);
+   ObjectSetString(0, name, OBJPROP_FONT, "Wingdings");
+}
+
+//+------------------------------------------------------------------+
+void SetTextTopRight(string name, string text, int x, int y, color colour, int fontsize=12, bool bold=false)
+{
+   if (ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+
+   int corner = MoveToTopRight ? CORNER_RIGHT_UPPER : CORNER_LEFT_UPPER;
+   
+   ObjectSetInteger(0, name, OBJPROP_CORNER, corner);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, colour);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, fontsize);
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetString(0, name, OBJPROP_FONT, "Arial");
+   
+   if (bold) {
+      // Make bold by using a bold font
+      ObjectSetString(0, name, OBJPROP_FONT, "Arial Bold");
+   }
+}
+//+------------------------------------------------------------------+
