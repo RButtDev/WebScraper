@@ -57,6 +57,8 @@ manipulation_color = input.color(color.white, "", group=g_manip, inline="manipul
 manipulation_width = input.int(1, "", minval=1, maxval=4, group=g_manip, inline="manipulation")
 show_manipulation_label = input.bool(true, "Show Manipulation Labels", group=g_manip, tooltip="Toggle labels for manipulation levels")
 use_manip_gradient = input.bool(false, "Use Color Gradient", group=g_manip, tooltip="Use color gradient based on historical reliability")
+// New gradient fill setting
+show_gradient_fill = input.bool(false, "Show Gradient Fill", group=g_manip, tooltip="Fill area between manipulation and median levels with gradient")
 
 // === Distribution Settings Group ===
 g_dist = "Distribution Levels"
@@ -384,6 +386,10 @@ var box bear_projection = na
 var line manip_time_line = na
 var label manip_time_line_label = na
 
+// NEW: Gradient fill boxes for manipulation levels
+var box upper_manip_fill = na
+var box lower_manip_fill = na
+
 // Initialize lines and labels
 if barstate.isfirst
     anchor_line := line.new(bar_index, na, bar_index, na, xloc.bar_index, extend.both, anchor_color, get_line_style(anchor_style), anchor_width)
@@ -413,6 +419,10 @@ if barstate.isfirst
         median_manip_line := line.new(bar_index, na, bar_index+1, na, color=color.new(manipulation_color, 30), style=line.style_dashed, width=1)
         lower_median_manip_line := line.new(bar_index, na, bar_index+1, na, color=color.new(manipulation_color, 30), style=line.style_dashed, width=1)
         median_dist_line := line.new(bar_index, na, bar_index+1, na, color=color.new(distribution_color, 30), style=line.style_dashed, width=1)
+    
+    if show_gradient_fill
+        upper_manip_fill := box.new(bar_index, na, bar_index+1, na, bgcolor=color.new(color.red, 90), border_color=color.new(color.red, 100))
+        lower_manip_fill := box.new(bar_index, na, bar_index+1, na, bgcolor=color.new(color.green, 90), border_color=color.new(color.green, 100))
     
     if percentile_levels
         p25_manip_line := line.new(bar_index, na, bar_index+1, na, color=color.new(manipulation_color, 70), style=line.style_dotted, width=1)
@@ -470,6 +480,20 @@ if is_session_start
         line.set_xy1(lower_manipulation_line, bar_index, session_open - avg_manipulation)
         line.set_xy2(lower_manipulation_line, bar_index + projection_offset, session_open - avg_manipulation)
         line.set_color(lower_manipulation_line, actual_color)
+        
+        // Add gradient fill between manipulation and median levels if enabled
+        if show_gradient_fill and show_median and not na(median_manipulation)
+            // Upper manipulation fill (red gradient)
+            box.set_lefttop(upper_manip_fill, bar_index, session_open + avg_manipulation)
+            box.set_rightbottom(upper_manip_fill, bar_index + projection_offset, session_open + median_manipulation)
+            box.set_bgcolor(upper_manip_fill, color.new(color.red, 85))
+            box.set_border_color(upper_manip_fill, color.new(color.red, 100))
+            
+            // Lower manipulation fill (green gradient)
+            box.set_lefttop(lower_manip_fill, bar_index, session_open - avg_manipulation)
+            box.set_rightbottom(lower_manip_fill, bar_index + projection_offset, session_open - median_manipulation)
+            box.set_bgcolor(lower_manip_fill, color.new(color.green, 85))
+            box.set_border_color(lower_manip_fill, color.new(color.green, 100))
         
         if show_manipulation_label
             // Include success rate in label if enhanced table is enabled
@@ -675,6 +699,11 @@ if bar_index > bar_index[1]  // Update lines and labels
     if show_price_projections
         box.set_right(bull_projection, bar_index + projection_offset)
         box.set_right(bear_projection, bar_index + projection_offset)
+        
+    // Update gradient fill boxes
+    if show_gradient_fill and show_manipulation and show_median
+        box.set_right(upper_manip_fill, bar_index + projection_offset)
+        box.set_right(lower_manip_fill, bar_index + projection_offset)
 
 // === Enhanced Table Display (IMPROVED) ===
 var table session_table = na
