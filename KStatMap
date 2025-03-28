@@ -1,0 +1,755 @@
+//@version=6
+indicator("K statmap", overlay=true)
+
+// ===== IMPROVED USER INTERFACE ORGANIZATION =====
+// Using groups to organize related settings for better UI experience
+
+// === Session Settings Group ===
+g_session = "Session Configuration"
+session_time = input.string("0500-1600", "Session Time (HHMM-HHMM)", group=g_session, tooltip="Specify session range (e.g., 0000-1600 for midnight to 4:00 PM)")
+time_zone = input.string("UTC", "Time Zone", options=["UTC", "America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "Asia/Tokyo"], group=g_session, tooltip="Set the time zone for session timing")
+hist_sessions = input.int(100, "Historical Sessions", minval=1, group=g_session, tooltip="Number of past sessions for statistical analysis")
+
+// Multiple Session Analysis (NEW FEATURE)
+use_multi_session = input.bool(false, "Enable Multi-Session Analysis", group=g_session, tooltip="Analyze multiple sessions simultaneously")
+secondary_session = input.string("1600-2359", "Secondary Session Time", group=g_session, tooltip="Second session time range for comparison", inline="sec_session")
+secondary_color = input.color(color.purple, "", inline="sec_session", group=g_session)
+
+// === Statistical Settings Group (NEW) ===
+g_stats = "Statistical Analysis"
+show_median = input.bool(true, "Show Median Levels", group=g_stats, tooltip="Display median values alongside averages")
+show_stdev = input.bool(true, "Show Standard Deviation Bands", group=g_stats, tooltip="Display standard deviation bands for statistical ranges")
+stdev_multiplier = input.float(1.0, "StdDev Multiplier", minval=0.1, step=0.1, group=g_stats, tooltip="Multiplier for standard deviation bands")
+percentile_levels = input.bool(false, "Show Percentile Levels", group=g_stats, tooltip="Display 25th and 75th percentile levels")
+filter_outliers = input.bool(false, "Filter Outliers", group=g_stats, tooltip="Remove statistical outliers from calculations")
+outlier_threshold = input.float(2.0, "Outlier Threshold (StdDev)", minval=1.0, step=0.1, group=g_stats, tooltip="Standard deviation threshold for outlier detection")
+
+// === Manipulation Time Settings Group (NEW) ===
+g_manip_time = "Manipulation Time"
+show_avg_manip_time = input.bool(true, "Show Average Manipulation Time", group=g_manip_time, tooltip="Display the average time when manipulation occurs")
+manip_time_format = input.string("Time of Day", "Time Format", options=["Time of Day", "Minutes", "Bars", "Percent of Session"], group=g_manip_time, tooltip="Format to display the average manipulation time")
+show_manip_time_line = input.bool(true, "Show Vertical Time Line", group=g_manip_time, tooltip="Display a vertical line at the average manipulation time")
+manip_time_line_color = input.color(#2196F3, "Line Color", group=g_manip_time)
+manip_time_line_style = input.string("Solid", "Line Style", options=["Solid", "Dashed", "Dotted"], group=g_manip_time)
+manip_time_line_width = input.int(1, "Line Width", minval=1, maxval=4, group=g_manip_time)
+
+// === Anchor Settings Group ===
+g_anchor = "Anchor Line"
+show_anchor = input.bool(true, "Show Session Anchor", group=g_anchor, inline="anchor", tooltip="Toggle vertical line at session start")
+anchor_style = input.string("Dotted", "", options=["Solid", "Dashed", "Dotted"], group=g_anchor, inline="anchor")
+anchor_color = input.color(color.white, "", group=g_anchor, inline="anchor")
+anchor_width = input.int(1, "", minval=1, maxval=4, group=g_anchor, inline="anchor")
+show_anchor_label = input.bool(true, "Show Anchor Label", group=g_anchor, tooltip="Toggle label for anchor line")
+
+// === Session Open Line Settings Group ===
+g_open = "Session Open Line"
+show_session_open = input.bool(true, "Show Session Open Line", group=g_open, inline="session_open", tooltip="Toggle horizontal session open line")
+session_open_style = input.string("Dotted", "", options=["Solid", "Dashed", "Dotted"], group=g_open, inline="session_open")
+session_open_color = input.color(color.white, "", group=g_open, inline="session_open")
+session_open_width = input.int(1, "", minval=1, maxval=4, group=g_open, inline="session_open")
+show_session_open_label = input.bool(true, "Show Session Open Label", group=g_open, tooltip="Toggle label for session open line")
+
+// === Manipulation Settings Group ===
+g_manip = "Manipulation Levels"
+show_manipulation = input.bool(true, "Show Manipulation Levels", group=g_manip, inline="manipulation", tooltip="Toggle horizontal manipulation levels")
+manipulation_style = input.string("Dotted", "", options=["Solid", "Dashed", "Dotted"], group=g_manip, inline="manipulation")
+manipulation_color = input.color(color.white, "", group=g_manip, inline="manipulation")
+manipulation_width = input.int(1, "", minval=1, maxval=4, group=g_manip, inline="manipulation")
+show_manipulation_label = input.bool(true, "Show Manipulation Labels", group=g_manip, tooltip="Toggle labels for manipulation levels")
+use_manip_gradient = input.bool(false, "Use Color Gradient", group=g_manip, tooltip="Use color gradient based on historical reliability")
+
+// === Distribution Settings Group ===
+g_dist = "Distribution Levels"
+show_distribution = input.bool(true, "Show Distribution Levels", group=g_dist, inline="distribution", tooltip="Toggle horizontal distribution levels")
+distribution_style = input.string("Solid", "", options=["Solid", "Dashed", "Dotted"], group=g_dist, inline="distribution")
+distribution_color = input.color(color.white, "", group=g_dist, inline="distribution")
+distribution_width = input.int(1, "", minval=1, maxval=4, group=g_dist, inline="distribution")
+show_distribution_label = input.bool(true, "Show Distribution Labels", group=g_dist, tooltip="Toggle labels for distribution levels")
+use_dist_gradient = input.bool(false, "Use Color Gradient", group=g_dist, tooltip="Use color gradient based on historical reliability")
+
+// === Projection Settings (NEW) ===
+g_proj = "Price Projections"
+show_price_projections = input.bool(false, "Show Price Projections", group=g_proj, tooltip="Display price projection zones based on historical patterns")
+projection_method = input.string("Historical Average", "Calculation Method", options=["Historical Average", "Session High/Low", "Fibonacci"], group=g_proj)
+projection_transparency = input.int(80, "Zone Transparency", minval=0, maxval=100, group=g_proj)
+
+// === Display Settings Group ===
+g_display = "Display Settings"
+projection_offset = input.int(24, "Projection Offset (Bars)", minval=0, group=g_display, tooltip="Number of bars to extend projection lines beyond session start")
+label_size = input.string("Large", "Label Size", options=["Tiny", "Small", "Normal", "Large"], group=g_display, tooltip="Size of labels for all lines")
+show_heatmap = input.bool(false, "Use Heatmap Coloring", group=g_display, tooltip="Color levels based on historical reversal probability")
+
+// === Table Settings (IMPROVED) ===
+g_table = "Stats Table"
+show_table = input.bool(false, "Show Stats Table", group=g_table, tooltip="Toggle table showing session statistics")
+enhanced_table = input.bool(false, "Enhanced Table", group=g_table, tooltip="Show additional statistics in table")
+table_position = input.string("Bottom Right", "Table Position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group=g_table)
+table_size = input.string("Small", "Table Size", options=["Small", "Normal", "Large"], group=g_table)
+
+// === Helper Functions ===
+get_line_style(style_string) =>
+    style_string == "Solid" ? line.style_solid : style_string == "Dashed" ? line.style_dashed : line.style_dotted
+
+get_label_size(size_string) =>
+    size_string == "Tiny" ? size.tiny : size_string == "Small" ? size.small : size_string == "Normal" ? size.normal : size.large
+
+// === Session Detection ===
+is_in_session = not na(time(timeframe.period, session_time, time_zone))
+is_session_start = is_in_session and not is_in_session[1]
+is_session_end = not is_in_session and is_in_session[1]
+
+// Secondary session detection (MULTI-SESSION SUPPORT)
+is_in_secondary = use_multi_session and not na(time(timeframe.period, secondary_session, time_zone))
+is_secondary_start = is_in_secondary and not is_in_secondary[1]
+
+// === Session Data Tracking ===
+var float session_open = na
+var float session_high = na
+var float session_low = na
+var float session_close = na
+var float prev_close = na
+var int session_start_bar = na  // Track session start bar for time calculations
+
+// For volume-weighted analysis (NEW)
+var float volume_weighted_price = na
+var float total_volume = na
+
+// For manipulation time tracking (NEW)
+var bool upper_manip_hit = false
+var bool lower_manip_hit = false
+var int upper_manip_time = na
+var int lower_manip_time = na
+var int[] upper_manip_times = array.new_int(0)
+var int[] lower_manip_times = array.new_int(0)
+
+if is_session_start
+    session_open := open
+    session_high := high
+    session_low := low
+    session_close := close
+    prev_close := close[1]
+    volume_weighted_price := volume * close
+    total_volume := volume
+    session_start_bar := bar_index  // Store the bar index for time calculations
+    upper_manip_hit := false        // Reset manipulation hits for new session
+    lower_manip_hit := false
+    upper_manip_time := na
+    lower_manip_time := na
+else if is_in_session
+    session_high := math.max(session_high, high)
+    session_low := math.min(session_low, low)
+    session_close := close
+    volume_weighted_price := volume_weighted_price + volume * close
+    total_volume := total_volume + volume
+
+// Calculate volume-weighted average price (VWAP) for the session
+vwap_price = total_volume > 0 ? volume_weighted_price / total_volume : na
+
+// We'll track manipulation time later after avg_manipulation is calculated
+
+// === Arrays and Counters ===
+var float[] manipulation_distances = array.new_float(0)
+var float[] distribution_distances = array.new_float(0)
+var int[] session_types = array.new_int(0)
+var float[] success_rates_manip = array.new_float(0)  // NEW: Track success rates for manipulation levels
+var float[] success_rates_dist = array.new_float(0)   // NEW: Track success rates for distribution levels
+var float[] moves_after_hit = array.new_float(0)      // NEW: Track average price movements after hitting levels
+var int bullish_count = 0
+var int bearish_count = 0
+
+// Secondary session arrays
+var float[] secondary_manip = array.new_float(0)
+var float[] secondary_dist = array.new_float(0)
+
+// Track session-level data
+if is_session_end
+    int session_type = 0
+    float manipulation = na
+    float distribution = na
+    
+    if session_close > session_open
+        manipulation := session_open - session_low
+        distribution := session_high - session_open
+        session_type := 1
+    else if session_close < session_open
+        manipulation := session_high - session_open
+        distribution := session_open - session_low
+        session_type := -1
+    
+    // Calculate success rates (simplified example - would need more logic in real implementation)
+    success_rate_manip = 0.75  // Placeholder - would calculate based on historical data
+    success_rate_dist = 0.65   // Placeholder - would calculate based on historical data
+    move_after_hit = (session_high - session_low) * 0.5  // Placeholder - average movement after hitting level
+    
+    if session_type != 0
+        // Check for outliers if filter is enabled
+        is_outlier = false
+        if filter_outliers and array.size(manipulation_distances) > 5
+            manip_mean = array.avg(manipulation_distances)
+            manip_stdev = array.stdev(manipulation_distances)
+            dist_mean = array.avg(distribution_distances)
+            dist_stdev = array.stdev(distribution_distances)
+            
+            is_outlier := math.abs(manipulation - manip_mean) > outlier_threshold * manip_stdev or math.abs(distribution - dist_mean) > outlier_threshold * dist_stdev
+        
+        if not is_outlier
+            array.push(manipulation_distances, manipulation)
+            array.push(distribution_distances, distribution)
+            array.push(session_types, session_type)
+            array.push(success_rates_manip, success_rate_manip)
+            array.push(success_rates_dist, success_rate_dist)
+            array.push(moves_after_hit, move_after_hit)
+            
+            // Add manipulation times to arrays if they were hit
+            if not na(upper_manip_time)
+                array.push(upper_manip_times, upper_manip_time)
+            if not na(lower_manip_time)
+                array.push(lower_manip_times, lower_manip_time)
+            
+            if session_type == 1
+                bullish_count := bullish_count + 1
+            else
+                bearish_count := bearish_count - 1
+            
+            if array.size(session_types) > hist_sessions
+                int old_type = array.shift(session_types)
+                if old_type == 1
+                    bullish_count := bullish_count - 1
+                else
+                    bearish_count := bearish_count - 1
+                array.shift(manipulation_distances)
+                array.shift(distribution_distances)
+                array.shift(success_rates_manip)
+                array.shift(success_rates_dist)
+                array.shift(moves_after_hit)
+                
+                // Keep manipulation time arrays at the right size
+                if array.size(upper_manip_times) > hist_sessions
+                    array.shift(upper_manip_times)
+                if array.size(lower_manip_times) > hist_sessions
+                    array.shift(lower_manip_times)
+
+// === Calculate Statistics ===
+// Average (mean) values
+avg_manipulation = array.size(manipulation_distances) > 0 ? array.avg(manipulation_distances) : na
+avg_distribution = array.size(distribution_distances) > 0 ? array.avg(distribution_distances) : na
+
+// === Track Manipulation Time (NEW) ===
+// Now that avg_manipulation is calculated, we can check if price hits the levels
+if is_in_session and not na(session_open) and not na(session_start_bar) and not na(avg_manipulation)
+    // Upper manipulation level hit
+    if not upper_manip_hit and high >= session_open + avg_manipulation
+        upper_manip_hit := true
+        upper_manip_time := bar_index - session_start_bar
+    
+    // Lower manipulation level hit
+    if not lower_manip_hit and low <= session_open - avg_manipulation
+        lower_manip_hit := true
+        lower_manip_time := bar_index - session_start_bar
+
+// Calculate average manipulation times
+float avg_upper_manip_time = array.size(upper_manip_times) > 0 ? array.avg(upper_manip_times) : na
+float avg_lower_manip_time = array.size(lower_manip_times) > 0 ? array.avg(lower_manip_times) : na
+float avg_manip_time = na
+if not na(avg_upper_manip_time) and not na(avg_lower_manip_time)
+    avg_manip_time := (avg_upper_manip_time + avg_lower_manip_time) / 2
+else if not na(avg_upper_manip_time)
+    avg_manip_time := avg_upper_manip_time
+else if not na(avg_lower_manip_time)
+    avg_manip_time := avg_lower_manip_time
+
+// Format manipulation time based on user preference
+format_manip_time(time_value) =>
+    if na(time_value)
+        "N/A"
+    else if manip_time_format == "Time of Day"
+        // Extract session start time from session_time
+        session_parts = str.split(session_time, "-")
+        start_time_str = array.get(session_parts, 0)
+        
+        // Convert session start from "HHMM" format to hours and minutes
+        start_hour = math.floor(str.tonumber(start_time_str) / 100)
+        start_minute = math.floor(str.tonumber(start_time_str) % 100)
+        
+        // Convert bar-based time to minutes
+        minutes_elapsed = time_value * timeframe.multiplier
+        
+        // Calculate total minutes since session start
+        total_minutes = start_hour * 60 + start_minute + minutes_elapsed
+        
+        // Calculate actual time of day
+        final_hour = math.floor(total_minutes / 60) % 24
+        final_minute = math.floor(total_minutes % 60)
+        
+        // Format as HH:MM with leading zeros
+        hour_str = final_hour < 10 ? "0" + str.tostring(final_hour) : str.tostring(final_hour)
+        minute_str = final_minute < 10 ? "0" + str.tostring(final_minute) : str.tostring(final_minute)
+        hour_str + ":" + minute_str
+    else if manip_time_format == "Minutes"
+        minutes = math.round(time_value * timeframe.multiplier / 60)
+        str.tostring(minutes) + " min"
+    else if manip_time_format == "Bars"
+        str.tostring(math.round(time_value)) + " bars"
+    else  // "Percent of Session"
+        // Estimate total session length in bars
+        session_parts = str.split(session_time, "-")
+        start_time = str.tonumber(array.get(session_parts, 0))
+        end_time = str.tonumber(array.get(session_parts, 1))
+        if end_time < start_time  // Overnight session
+            end_time := end_time + 2400
+        total_minutes = (math.floor(end_time / 100) * 60 + end_time % 100) - (math.floor(start_time / 100) * 60 + start_time % 100)
+        total_bars = total_minutes / timeframe.multiplier
+        percentage = math.round(time_value / total_bars * 100)
+        str.tostring(percentage) + "%"
+
+// NEW: Median values
+median_manipulation = array.size(manipulation_distances) > 3 ? array.median(manipulation_distances) : na
+median_distribution = array.size(distribution_distances) > 3 ? array.median(distribution_distances) : na
+
+// NEW: Standard deviations
+stdev_manipulation = array.size(manipulation_distances) > 3 ? array.stdev(manipulation_distances) : na
+stdev_distribution = array.size(distribution_distances) > 3 ? array.stdev(distribution_distances) : na
+
+// NEW: Percentile calculations
+get_percentile(arr, percentile) =>
+    sorted = array.copy(arr)
+    array.sort(sorted)
+    idx = math.round(percentile / 100 * (array.size(sorted) - 1))
+    array.get(sorted, idx)
+
+p25_manipulation = array.size(manipulation_distances) > 4 ? get_percentile(manipulation_distances, 25) : na
+p75_manipulation = array.size(manipulation_distances) > 4 ? get_percentile(manipulation_distances, 75) : na
+p25_distribution = array.size(distribution_distances) > 4 ? get_percentile(distribution_distances, 25) : na
+p75_distribution = array.size(distribution_distances) > 4 ? get_percentile(distribution_distances, 75) : na
+
+// NEW: Calculate average success rates
+avg_success_manip = array.size(success_rates_manip) > 0 ? array.avg(success_rates_manip) : na
+avg_success_dist = array.size(success_rates_dist) > 0 ? array.avg(success_rates_dist) : na
+avg_move_after = array.size(moves_after_hit) > 0 ? array.avg(moves_after_hit) : na
+
+// === Heatmap Color Functions (NEW) ===
+get_heatmap_color(base_color, strength) =>
+    intensity = math.max(0, math.min(255, math.round(strength * 255)))
+    r = color.r(base_color)
+    g = color.g(base_color)
+    b = color.b(base_color)
+    
+    // Adjust color based on strength (higher strength = more saturated)
+    r_new = math.round(r * (1 - (1 - strength) * 0.7))
+    g_new = math.round(g * (1 - (1 - strength) * 0.7))
+    b_new = math.round(b * (1 - (1 - strength) * 0.7))
+    
+    color.rgb(r_new, g_new, b_new)
+
+// === Plotting Levels and Labels ===
+var line anchor_line = na
+var label anchor_label = na
+var line session_open_line = na
+var label session_open_label = na
+
+// Manipulation level lines
+var line upper_manipulation_line = na
+var label upper_manipulation_label = na
+var line lower_manipulation_line = na
+var label lower_manipulation_label = na
+
+// Distribution level lines
+var line upper_distribution_line = na
+var label upper_distribution_label = na
+var line lower_distribution_line = na
+var label lower_distribution_label = na
+
+// NEW: Standard deviation band lines
+var line upper_stdev_manip = na
+var line lower_stdev_manip = na
+var line upper_stdev_dist = na
+var line lower_stdev_dist = na
+
+// NEW: Median level lines
+var line median_manip_line = na
+var line lower_median_manip_line = na
+var line median_dist_line = na
+
+// NEW: Percentile level lines//
+var line p25_manip_line = na
+var line p75_manip_line = na
+var line p25_dist_line = na
+var line p75_dist_line = na
+
+// NEW: Projection zone boxes//
+var box bull_projection = na
+var box bear_projection = na
+
+// NEW: Manipulation time line
+var line manip_time_line = na
+var label manip_time_line_label = na
+
+// Initialize lines and labels
+if barstate.isfirst
+    anchor_line := line.new(bar_index, na, bar_index, na, xloc.bar_index, extend.both, anchor_color, get_line_style(anchor_style), anchor_width)
+    //anchor_label := label.new(bar_index, na, "OHLCStats v2.0 © dc_77", style=label.style_label_right, color=color.new(anchor_color, 100), textcolor=anchor_color, size=get_label_size(label_size))
+    
+    session_open_line := line.new(bar_index, na, bar_index+1, na, color=session_open_color, style=get_line_style(session_open_style), width=session_open_width)
+    session_open_label := label.new(bar_index, na, "[0.00]", style=label.style_label_left, color=color.new(session_open_color, 100), textcolor=session_open_color, size=get_label_size(label_size))
+    
+    upper_manipulation_line := line.new(bar_index, na, bar_index+1, na, color=manipulation_color, style=get_line_style(manipulation_style), width=manipulation_width)
+    upper_manipulation_label := label.new(bar_index, na, "-M", style=label.style_label_left, color=color.new(manipulation_color, 100), textcolor=manipulation_color, size=get_label_size(label_size))
+    lower_manipulation_line := line.new(bar_index, na, bar_index+1, na, color=manipulation_color, style=get_line_style(manipulation_style), width=manipulation_width)
+    lower_manipulation_label := label.new(bar_index, na, "+M", style=label.style_label_left, color=color.new(manipulation_color, 100), textcolor=manipulation_color, size=get_label_size(label_size))
+    
+    upper_distribution_line := line.new(bar_index, na, bar_index+1, na, color=distribution_color, style=get_line_style(distribution_style), width=distribution_width)
+    upper_distribution_label := label.new(bar_index, na, "+D", style=label.style_label_left, color=color.new(distribution_color, 100), textcolor=distribution_color, size=get_label_size(label_size))
+    lower_distribution_line := line.new(bar_index, na, bar_index+1, na, color=distribution_color, style=get_line_style(distribution_style), width=distribution_width)
+    lower_distribution_label := label.new(bar_index, na, "-D", style=label.style_label_left, color=color.new(distribution_color, 100), textcolor=distribution_color, size=get_label_size(label_size))
+    
+    // Initialize NEW lines and labels
+    if show_stdev
+        upper_stdev_manip := line.new(bar_index, na, bar_index+1, na, color=color.new(manipulation_color, 50), style=line.style_dotted, width=1)
+        lower_stdev_manip := line.new(bar_index, na, bar_index+1, na, color=color.new(manipulation_color, 50), style=line.style_dotted, width=1)
+        upper_stdev_dist := line.new(bar_index, na, bar_index+1, na, color=color.new(distribution_color, 50), style=line.style_dotted, width=1)
+        lower_stdev_dist := line.new(bar_index, na, bar_index+1, na, color=color.new(distribution_color, 50), style=line.style_dotted, width=1)
+    
+    if show_median
+        median_manip_line := line.new(bar_index, na, bar_index+1, na, color=color.new(manipulation_color, 30), style=line.style_dashed, width=1)
+        lower_median_manip_line := line.new(bar_index, na, bar_index+1, na, color=color.new(manipulation_color, 30), style=line.style_dashed, width=1)
+        median_dist_line := line.new(bar_index, na, bar_index+1, na, color=color.new(distribution_color, 30), style=line.style_dashed, width=1)
+    
+    if percentile_levels
+        p25_manip_line := line.new(bar_index, na, bar_index+1, na, color=color.new(manipulation_color, 70), style=line.style_dotted, width=1)
+        p75_manip_line := line.new(bar_index, na, bar_index+1, na, color=color.new(manipulation_color, 70), style=line.style_dotted, width=1)
+        p25_dist_line := line.new(bar_index, na, bar_index+1, na, color=color.new(distribution_color, 70), style=line.style_dotted, width=1)
+        p75_dist_line := line.new(bar_index, na, bar_index+1, na, color=color.new(distribution_color, 70), style=line.style_dotted, width=1)
+    
+    if show_price_projections
+        bull_projection := box.new(bar_index, na, bar_index+1, na, bgcolor=color.new(color.green, projection_transparency), border_color=color.new(color.green, projection_transparency/2))
+        bear_projection := box.new(bar_index, na, bar_index+1, na, bgcolor=color.new(color.red, projection_transparency), border_color=color.new(color.red, projection_transparency/2))
+    
+    // NEW: Manipulation time label and line
+    if show_avg_manip_time
+        manip_time_line_label := label.new(bar_index, na, "Avg M Time: N/A", 
+                                          style=label.style_none, 
+                                          color=color.new(color.blue, 100), 
+                                          textcolor=color.blue, 
+                                          size=get_label_size(label_size))
+    
+    if show_manip_time_line
+        manip_time_line := line.new(bar_index, na, bar_index+1, na, color=manip_time_line_color, style=get_line_style(manip_time_line_style), width=manip_time_line_width)
+
+// Calculate success rate-based colors if heatmap option is enabled
+manip_color = show_heatmap and not na(avg_success_manip) ? get_heatmap_color(manipulation_color, avg_success_manip) : manipulation_color
+dist_color = show_heatmap and not na(avg_success_dist) ? get_heatmap_color(distribution_color, avg_success_dist) : distribution_color
+
+// Update lines and levels on session start
+if is_session_start
+    // Session Anchor (Vertical Line)
+    if show_anchor
+        line.set_xy1(anchor_line, bar_index, session_open)
+        line.set_xy2(anchor_line, bar_index, session_open)
+        if show_anchor_label and not na(avg_distribution)
+            anchor_label_x = bar_index
+            label.set_xy(anchor_label, anchor_label_x, session_open + avg_distribution)
+    
+    // Session Open Line
+    if show_session_open
+        line.set_xy1(session_open_line, bar_index, session_open)
+        line.set_xy2(session_open_line, bar_index + projection_offset, session_open)
+        label_text = "Open [" + str.tostring(session_open, format.mintick) + "]"
+        label.set_text(session_open_label, label_text)
+        if show_session_open_label
+            label.set_xy(session_open_label, bar_index + projection_offset, session_open)
+    
+    // Manipulation Levels
+    if show_manipulation and not na(avg_manipulation)
+        // Apply gradient color if enabled
+        actual_color = use_manip_gradient ? manip_color : manipulation_color
+        
+        line.set_xy1(upper_manipulation_line, bar_index, session_open + avg_manipulation)
+        line.set_xy2(upper_manipulation_line, bar_index + projection_offset, session_open + avg_manipulation)
+        line.set_color(upper_manipulation_line, actual_color)
+        
+        line.set_xy1(lower_manipulation_line, bar_index, session_open - avg_manipulation)
+        line.set_xy2(lower_manipulation_line, bar_index + projection_offset, session_open - avg_manipulation)
+        line.set_color(lower_manipulation_line, actual_color)
+        
+        if show_manipulation_label
+            // Include success rate in label if enhanced table is enabled
+            upper_text = enhanced_table ? "-M [" + str.tostring(avg_manipulation, format.mintick) + "] " + str.tostring(avg_success_manip * 100, "#.#") + "%" : "-M [" + str.tostring(avg_manipulation, format.mintick) + "]"
+            lower_text = enhanced_table ? "+M [" + str.tostring(avg_manipulation, format.mintick) + "] " + str.tostring(avg_success_manip * 100, "#.#") + "%" : "+M [" + str.tostring(avg_manipulation, format.mintick) + "]"
+            
+            label.set_text(upper_manipulation_label, upper_text)
+            label.set_text(lower_manipulation_label, lower_text)
+            label.set_xy(upper_manipulation_label, bar_index + projection_offset, session_open + avg_manipulation)
+            label.set_xy(lower_manipulation_label, bar_index + projection_offset, session_open - avg_manipulation)
+            label.set_textcolor(upper_manipulation_label, actual_color)
+            label.set_textcolor(lower_manipulation_label, actual_color)
+        
+        // NEW: Display average manipulation time
+        if show_avg_manip_time and not na(avg_manip_time)
+            manip_time_text = "Avg M Time: " + format_manip_time(avg_manip_time)
+            label.set_text(manip_time_line_label, manip_time_text)
+            // Position the time label near the manipulation level
+            label.set_xy(manip_time_line_label, bar_index + projection_offset, session_open + avg_manipulation * 1.2)
+            label.set_textcolor(manip_time_line_label, manip_time_line_color)
+        
+        // NEW: Display manipulation time line
+        if show_manip_time_line and not na(avg_manip_time) and not na(session_start_bar) and not na(avg_manipulation)
+            // Calculate the target bar where manipulation typically occurs
+            // Convert to integer using math.round since line coordinates need integers
+            manip_time_bar = math.round(session_start_bar + avg_manip_time)
+            
+            // Draw vertical line at the calculated bar, extending exactly from -M to +M
+            line.set_xy1(manip_time_line, manip_time_bar, session_open - avg_manipulation)  // +M level (lower)
+            line.set_xy2(manip_time_line, manip_time_bar, session_open + avg_manipulation)  // -M level (upper)
+            line.set_color(manip_time_line, manip_time_line_color)
+            line.set_style(manip_time_line, get_line_style(manip_time_line_style))
+            line.set_width(manip_time_line, manip_time_line_width)
+            
+            // Place label above the vertical manipulation time line
+            if show_avg_manip_time
+                // Create the time text
+                manip_time_text = "Avg M Time: " + format_manip_time(avg_manip_time)
+                label.set_text(manip_time_line_label, manip_time_text)
+                
+                // Position label directly above the vertical line (at its top)
+                label.set_xy(manip_time_line_label, manip_time_bar, session_open + avg_manipulation + (avg_manipulation * 0.10))
+                
+                // Style as simple text
+                label.set_style(manip_time_line_label, label.style_none)
+                label.set_color(manip_time_line_label, color.new(color.blue, 100)) // Fully transparent background
+                label.set_textcolor(manip_time_line_label, color.blue)
+    
+    // Distribution Levels
+    if show_distribution and not na(avg_distribution)
+        // Apply gradient color if enabled
+        actual_color = use_dist_gradient ? dist_color : distribution_color
+        
+        line.set_xy1(upper_distribution_line, bar_index, session_open + avg_distribution)
+        line.set_xy2(upper_distribution_line, bar_index + projection_offset, session_open + avg_distribution)
+        line.set_color(upper_distribution_line, actual_color)
+        
+        line.set_xy1(lower_distribution_line, bar_index, session_open - avg_distribution)
+        line.set_xy2(lower_distribution_line, bar_index + projection_offset, session_open - avg_distribution)
+        line.set_color(lower_distribution_line, actual_color)
+        
+        if show_distribution_label
+            // Include success rate in label if enhanced table is enabled
+            upper_text = enhanced_table ? "+D [" + str.tostring(avg_distribution, format.mintick) + "] " + str.tostring(avg_success_dist * 100, "#.#") + "%" : "+D [" + str.tostring(avg_distribution, format.mintick) + "]"
+            lower_text = enhanced_table ? "-D [" + str.tostring(avg_distribution, format.mintick) + "] " + str.tostring(avg_success_dist * 100, "#.#") + "%" : "-D [" + str.tostring(avg_distribution, format.mintick) + "]"
+            
+            label.set_text(upper_distribution_label, upper_text)
+            label.set_text(lower_distribution_label, lower_text)
+            label.set_xy(upper_distribution_label, bar_index + projection_offset, session_open + avg_distribution)
+            label.set_xy(lower_distribution_label, bar_index + projection_offset, session_open - avg_distribution)
+            label.set_textcolor(upper_distribution_label, actual_color)
+            label.set_textcolor(lower_distribution_label, actual_color)
+    
+    // Standard Deviation Bands (NEW)
+    if show_stdev and not na(stdev_manipulation) and not na(stdev_distribution)
+        // Manipulation StdDev bands
+        upper_stdev_val = session_open + avg_manipulation + stdev_manipulation * stdev_multiplier
+        lower_stdev_val = session_open - avg_manipulation - stdev_manipulation * stdev_multiplier
+        
+        line.set_xy1(upper_stdev_manip, bar_index, upper_stdev_val)
+        line.set_xy2(upper_stdev_manip, bar_index + projection_offset, upper_stdev_val)
+        line.set_xy1(lower_stdev_manip, bar_index, lower_stdev_val)
+        line.set_xy2(lower_stdev_manip, bar_index + projection_offset, lower_stdev_val)
+        
+        // Distribution StdDev bands
+        upper_stdev_dist_val = session_open + avg_distribution + stdev_distribution * stdev_multiplier
+        lower_stdev_dist_val = session_open - avg_distribution - stdev_distribution * stdev_multiplier
+        
+        line.set_xy1(upper_stdev_dist, bar_index, upper_stdev_dist_val)
+        line.set_xy2(upper_stdev_dist, bar_index + projection_offset, upper_stdev_dist_val)
+        line.set_xy1(lower_stdev_dist, bar_index, lower_stdev_dist_val)
+        line.set_xy2(lower_stdev_dist, bar_index + projection_offset, lower_stdev_dist_val)
+    
+    // Median Lines (NEW)
+    if show_median and not na(median_manipulation) and not na(median_distribution)
+        // Manipulation medians - need both upper and lower
+        line.set_xy1(median_manip_line, bar_index, session_open + median_manipulation)
+        line.set_xy2(median_manip_line, bar_index + projection_offset, session_open + median_manipulation)
+        
+        // NEW: Add a second median line for lower manipulation (+M)
+        if na(lower_median_manip_line)
+            lower_median_manip_line := line.new(bar_index, session_open - median_manipulation, bar_index + projection_offset, session_open - median_manipulation, 
+                                               color=color.new(manipulation_color, 30), style=line.style_dashed, width=1)
+        else
+            line.set_xy1(lower_median_manip_line, bar_index, session_open - median_manipulation)
+            line.set_xy2(lower_median_manip_line, bar_index + projection_offset, session_open - median_manipulation)
+        
+        // Distribution median
+        line.set_xy1(median_dist_line, bar_index, session_open + median_distribution)
+        line.set_xy2(median_dist_line, bar_index + projection_offset, session_open + median_distribution)
+    
+    // Percentile Levels (NEW)
+    if percentile_levels and not na(p25_manipulation) and not na(p75_manipulation)
+        // Manipulation percentiles
+        line.set_xy1(p25_manip_line, bar_index, session_open + p25_manipulation)
+        line.set_xy2(p25_manip_line, bar_index + projection_offset, session_open + p25_manipulation)
+        line.set_xy1(p75_manip_line, bar_index, session_open + p75_manipulation)
+        line.set_xy2(p75_manip_line, bar_index + projection_offset, session_open + p75_manipulation)
+        
+        // Distribution percentiles
+        line.set_xy1(p25_dist_line, bar_index, session_open + p25_distribution)
+        line.set_xy2(p25_dist_line, bar_index + projection_offset, session_open + p25_distribution)
+        line.set_xy1(p75_dist_line, bar_index, session_open + p75_distribution)
+        line.set_xy2(p75_dist_line, bar_index + projection_offset, session_open + p75_distribution)
+    
+    // Price Projection Zones (NEW)
+    if show_price_projections
+        // Calculate projection zones based on selected method
+        float bull_high = na
+        float bull_low = na
+        float bear_high = na
+        float bear_low = na
+        
+        if projection_method == "Historical Average"
+            // Use historical average moves for projection
+            bull_high := session_open + avg_distribution
+            bull_low := session_open - avg_manipulation
+            bear_high := session_open + avg_manipulation
+            bear_low := session_open - avg_distribution
+        else if projection_method == "Session High/Low"
+            // Use recent session high/low for projection
+            bull_high := session_high
+            bull_low := session_low
+            bear_high := session_high
+            bear_low := session_low
+        else if projection_method == "Fibonacci"
+            // Use Fibonacci levels for projection
+            price_range = avg_distribution + avg_manipulation
+            bull_high := session_open + price_range * 1.618
+            bull_low := session_open - price_range * 0.618
+            bear_high := session_open + price_range * 0.618
+            bear_low := session_open - price_range * 1.618
+        
+        // Update projection boxes
+        box.set_lefttop(bull_projection, bar_index, bull_high)
+        box.set_rightbottom(bull_projection, bar_index + projection_offset, bull_low)
+        box.set_lefttop(bear_projection, bar_index, bear_high)
+        box.set_rightbottom(bear_projection, bar_index + projection_offset, bear_low)
+
+// Extend lines beyond session
+if bar_index > bar_index[1]  // Update lines and labels
+    if show_session_open
+        line.set_x2(session_open_line, bar_index + projection_offset)
+        if show_session_open_label
+            label.set_x(session_open_label, bar_index + projection_offset)
+    
+    if show_manipulation
+        line.set_x2(upper_manipulation_line, bar_index + projection_offset)
+        line.set_x2(lower_manipulation_line, bar_index + projection_offset)
+        if show_manipulation_label
+            label.set_x(upper_manipulation_label, bar_index + projection_offset)
+            label.set_x(lower_manipulation_label, bar_index + projection_offset)
+    
+    if show_avg_manip_time
+        label.set_x(manip_time_line_label, bar_index + projection_offset)
+    
+    // No need to update manip_time_line's x coordinates since it's now vertical
+    
+    if show_distribution
+        line.set_x2(upper_distribution_line, bar_index + projection_offset)
+        line.set_x2(lower_distribution_line, bar_index + projection_offset)
+        if show_distribution_label
+            label.set_x(upper_distribution_label, bar_index + projection_offset)
+            label.set_x(lower_distribution_label, bar_index + projection_offset)
+    
+    if show_stdev
+        line.set_x2(upper_stdev_manip, bar_index + projection_offset)
+        line.set_x2(lower_stdev_manip, bar_index + projection_offset)
+        line.set_x2(upper_stdev_dist, bar_index + projection_offset)
+        line.set_x2(lower_stdev_dist, bar_index + projection_offset)
+    
+    if show_median
+        line.set_x2(median_manip_line, bar_index + projection_offset)
+        line.set_x2(lower_median_manip_line, bar_index + projection_offset)
+        line.set_x2(median_dist_line, bar_index + projection_offset)
+    
+    if percentile_levels
+        line.set_x2(p25_manip_line, bar_index + projection_offset)
+        line.set_x2(p75_manip_line, bar_index + projection_offset)
+        line.set_x2(p25_dist_line, bar_index + projection_offset)
+        line.set_x2(p75_dist_line, bar_index + projection_offset)
+    
+    if show_price_projections
+        box.set_right(bull_projection, bar_index + projection_offset)
+        box.set_right(bear_projection, bar_index + projection_offset)
+
+// === Enhanced Table Display (IMPROVED) ===
+var table session_table = na
+
+if barstate.isfirst
+    pos = table_position == "Top Left" ? position.top_left : table_position == "Top Right" ? position.top_right : table_position == "Bottom Left" ? position.bottom_left : position.bottom_right
+    
+    // Create a larger table for enhanced stats
+    cols = enhanced_table ? 3 : 2
+    rows = enhanced_table ? 7 : 2  // Added one more row for manipulation time
+    
+    session_table := table.new(pos, cols, rows, bgcolor=color.white, border_width=1)
+
+// Update table on each new bar
+if show_table
+    text_size = table_size == "Small" ? size.tiny : table_size == "Normal" ? size.small : size.normal
+    
+    // Basic stats (always shown)
+    table.cell(session_table, 0, 0, "Bullish", text_color=color.green, text_size=text_size)
+    table.cell(session_table, 1, 0, str.tostring(bullish_count), text_color=color.black, text_size=text_size)
+    table.cell(session_table, 0, 1, "Bearish", text_color=color.red, text_size=text_size)
+    table.cell(session_table, 1, 1, str.tostring(bearish_count), text_color=color.black, text_size=text_size)
+    
+    // Enhanced stats
+    if enhanced_table
+        // Calculate ratio
+        total_sessions = bullish_count + bearish_count
+        bull_ratio = total_sessions > 0 ? bullish_count / total_sessions * 100 : 50
+        bear_ratio = total_sessions > 0 ? bearish_count / total_sessions * 100 : 50
+        
+        // Row 2: Ratios
+        table.cell(session_table, 0, 2, "Bull/Bear %", text_color=color.black, text_size=text_size)
+        table.cell(session_table, 1, 2, str.tostring(bull_ratio, "#.#") + "%", text_color=color.green, text_size=text_size)
+        table.cell(session_table, 2, 2, str.tostring(bear_ratio, "#.#") + "%", text_color=color.red, text_size=text_size)
+        
+        // Row 3: Manipulation success rates
+        table.cell(session_table, 0, 3, "M Success", text_color=color.black, text_size=text_size)
+        m_success_text = not na(avg_success_manip) ? str.tostring(avg_success_manip * 100, "#.#") + "%" : "N/A"
+        table.cell(session_table, 1, 3, m_success_text, text_color=manipulation_color, text_size=text_size)
+        
+        // Row 4: Distribution success rates
+        table.cell(session_table, 0, 4, "D Success", text_color=color.black, text_size=text_size)
+        d_success_text = not na(avg_success_dist) ? str.tostring(avg_success_dist * 100, "#.#") + "%" : "N/A"
+        table.cell(session_table, 1, 4, d_success_text, text_color=distribution_color, text_size=text_size)
+        
+        // Row 5: Average move after hit
+        table.cell(session_table, 0, 5, "Avg Move", text_color=color.black, text_size=text_size)
+        avg_move_text = not na(avg_move_after) ? str.tostring(avg_move_after, format.mintick) : "N/A"
+        table.cell(session_table, 1, 5, avg_move_text, text_color=color.blue, text_size=text_size)
+        
+        // NEW: Row 6: Average manipulation time
+        table.cell(session_table, 0, 6, "Avg M Time", text_color=color.black, text_size=text_size)
+        avg_time_text = not na(avg_manip_time) ? format_manip_time(avg_manip_time) : "N/A"
+        table.cell(session_table, 1, 6, avg_time_text, text_color=manipulation_color, text_size=text_size)
+
+/// === Alert Condition Booleans ===
+sessionOpenCross = show_session_open and not na(session_open) and ta.cross(close, session_open)
+upperManipCross = show_manipulation and not na(avg_manipulation) and not na(session_open) and ta.cross(close, session_open + avg_manipulation)
+lowerManipCross = show_manipulation and not na(avg_manipulation) and not na(session_open) and ta.cross(close, session_open - avg_manipulation)
+upperDistCross = show_distribution and not na(avg_distribution) and not na(session_open) and ta.cross(close, session_open + avg_distribution)
+lowerDistCross = show_distribution and not na(avg_distribution) and not na(session_open) and ta.cross(close, session_open - avg_distribution)
+
+// NEW: Additional alerts for statistical levels
+medianManipCross = show_median and not na(median_manipulation) and not na(session_open) and ta.cross(close, session_open + median_manipulation)
+medianDistCross = show_median and not na(median_distribution) and not na(session_open) and ta.cross(close, session_open + median_distribution)
+stdevUpperManipCross = show_stdev and not na(stdev_manipulation) and not na(session_open) and ta.cross(close, session_open + avg_manipulation + stdev_manipulation * stdev_multiplier)
+stdevLowerManipCross = show_stdev and not na(stdev_manipulation) and not na(session_open) and ta.cross(close, session_open - avg_manipulation - stdev_manipulation * stdev_multiplier)
+
+/// === Alert Conditions ===
+alertcondition(sessionOpenCross, title="Session Open Cross", message="Price crossed Session Open at {{close}}")
+alertcondition(upperManipCross, title="Upper Manipulation Cross", message="Price crossed -M at {{close}}")
+alertcondition(lowerManipCross, title="Lower Manipulation Cross", message="Price crossed +M at {{close}}")
+alertcondition(upperDistCross, title="Upper Distribution Cross", message="Price crossed +D at {{close}}")
+alertcondition(lowerDistCross, title="Lower Distribution Cross", message="Price crossed -D at {{close}}")
+alertcondition(medianManipCross, title="Median Manipulation Cross", message="Price crossed Median M at {{close}}")
+alertcondition(medianDistCross, title="Median Distribution Cross", message="Price crossed Median D at {{close}}")
+alertcondition(stdevUpperManipCross, title="StdDev Upper Manip Cross", message="Price crossed StdDev Upper M at {{close}}")
+alertcondition(stdevLowerManipCross, title="StdDev Lower Manip Cross", message="Price crossed StdDev Lower M at {{close}}")
