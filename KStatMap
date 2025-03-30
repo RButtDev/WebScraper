@@ -15,6 +15,67 @@ use_multi_session = input.bool(false, "Enable Multi-Session Analysis", group=g_s
 secondary_session = input.string("1600-2359", "Secondary Session Time", group=g_session, tooltip="Second session time range for comparison", inline="sec_session")
 secondary_color = input.color(color.purple, "", inline="sec_session", group=g_session)
 
+// === Session Optimization Group ===
+g_session_opt = "Session Optimization"
+enable_session_optimization = input.bool(false, "Enable Session Optimization", group=g_session_opt, tooltip="Run statistical analysis to find optimal session times")
+optimization_target = input.string("London", "Optimize For", options=["London", "New York", "Custom"], group=g_session_opt, tooltip="Select market session to optimize")
+test_period = input.int(30, "Test Period (Days)", minval=10, maxval=180, group=g_session_opt, tooltip="Number of days to analyze for optimal session times")
+success_weight = input.float(1.0, "Success Rate Weight", minval=0.1, maxval=5.0, step=0.1, group=g_session_opt, tooltip="Weight for manipulation level success in optimization")
+volatility_weight = input.float(1.0, "Volatility Weight", minval=0.1, maxval=5.0, step=0.1, group=g_session_opt, tooltip="Weight for price volatility in optimization")
+show_optimization_table = input.bool(true, "Show Optimization Results", group=g_session_opt, tooltip="Display table with optimization results")
+
+// Session ranges to test based on selection
+var string[] test_sessions = array.new_string(0)
+
+// Initialize test session arrays if optimization is enabled
+if barstate.isfirst and enable_session_optimization
+    array.clear(test_sessions)
+    
+    if optimization_target == "London"
+        // Test London session variations (0700-1600 with 30 min increments)
+        array.push(test_sessions, "2200-1600")
+        array.push(test_sessions, "2230-1600")
+        array.push(test_sessions, "2300-1600")
+        array.push(test_sessions, "2330-1600")
+        array.push(test_sessions, "0000-1600")
+        array.push(test_sessions, "0030-1600")
+        array.push(test_sessions, "0100-1600")
+        array.push(test_sessions, "0130-1600")
+        array.push(test_sessions, "0200-1600") 
+        array.push(test_sessions, "0230-1600")
+        array.push(test_sessions, "0300-1600")
+        array.push(test_sessions, "0330-1600")
+        array.push(test_sessions, "0400-1600")
+        array.push(test_sessions, "0430-1600")
+        array.push(test_sessions, "0500-1600")
+        array.push(test_sessions, "0530-1600")
+        array.push(test_sessions, "0600-1600")
+        array.push(test_sessions, "0630-1600")
+        array.push(test_sessions, "0700-1600")
+        array.push(test_sessions, "0730-1600")
+        array.push(test_sessions, "0800-1600")
+    else if optimization_target == "New York"
+        // Test New York session variations
+        array.push(test_sessions, "0800-1900")
+        array.push(test_sessions, "0830-1900")
+        array.push(test_sessions, "0900-1900")
+        array.push(test_sessions, "0930-1900")
+        array.push(test_sessions, "1000-1900")
+        array.push(test_sessions, "1030-1900")
+        array.push(test_sessions, "1100-1900")
+        array.push(test_sessions, "1130-1900")
+        array.push(test_sessions, "1200-1900")
+        array.push(test_sessions, "1230-1900")
+        array.push(test_sessions, "1300-1900")
+        array.push(test_sessions, "1330-1900")
+        array.push(test_sessions, "1400-1900")
+    else // Custom - test a wider range
+        array.push(test_sessions, "0000-0800")
+        array.push(test_sessions, "0400-1200") 
+        array.push(test_sessions, "0800-1600")
+        array.push(test_sessions, "1200-2000")
+        array.push(test_sessions, "1600-0000")
+
 // === Statistical Settings Group (NEW) ===
 g_stats = "Statistical Analysis"
 show_median = input.bool(true, "Show Median Levels", group=g_stats, tooltip="Display median values alongside averages")
@@ -124,6 +185,32 @@ var int lower_manip_time = na
 var int[] upper_manip_times = array.new_int(0)
 var int[] lower_manip_times = array.new_int(0)
 
+// === Session Optimization Variables ===
+var float[] session_volatility = array.new_float(0)
+var float[] manip_hit_rates = array.new_float(0)
+var float[] move_after_hits = array.new_float(0)
+var float[] optimization_scores = array.new_float(0)
+var int[] session_days_tested = array.new_int(0)
+
+// Variables for tracking test session data
+var float[] test_session_vols = array.new_float(0)   // Volatility for each session
+var int[] test_session_vol_ids = array.new_int(0)    // Session IDs for volatility data
+
+var int[] test_session_hits = array.new_int(0)       // Count of hits for each session
+var int[] test_session_hit_ids = array.new_int(0)    // Session IDs for hit data
+
+var float[] test_session_moves = array.new_float(0)  // Move sizes for each session
+var int[] test_session_move_ids = array.new_int(0)   // Session IDs for move data
+
+// Initialize session optimization arrays
+if barstate.isfirst and enable_session_optimization
+    for i = 0 to array.size(test_sessions) - 1
+        array.push(session_volatility, 0.0)
+        array.push(manip_hit_rates, 0.0)
+        array.push(move_after_hits, 0.0)
+        array.push(optimization_scores, 0.0)
+        array.push(session_days_tested, 0)
+
 if is_session_start
     session_open := open
     session_high := high
@@ -146,6 +233,30 @@ else if is_in_session
 
 // Calculate volume-weighted average price (VWAP) for the session
 vwap_price = total_volume > 0 ? volume_weighted_price / total_volume : na
+
+// === Session Optimization Data Collection ===
+// Test each potential session if optimization is enabled
+if enable_session_optimization
+    for i = 0 to array.size(test_sessions) - 1
+        test_session = array.get(test_sessions, i)
+        is_in_test_session = not na(time(timeframe.period, test_session, time_zone))
+        
+        // For each test session, track:
+        // 1. If current bar is in that test session
+        // 2. Volatility during test session
+        
+        if is_in_test_session
+            // Calculate session volatility (high-low range)
+            session_volatility_value = (high - low) / low * 100  // As percentage
+            
+            // Store data with session ID
+            array.push(test_session_vols, session_volatility_value)
+            array.push(test_session_vol_ids, i)
+            
+            // Keep only last test_period days of data
+            if array.size(test_session_vols) > test_period * array.size(test_sessions)
+                array.shift(test_session_vols)
+                array.shift(test_session_vol_ids)
 
 // We'll track manipulation time later after avg_manipulation is calculated
 
@@ -243,11 +354,61 @@ if is_in_session and not na(session_open) and not na(session_start_bar) and not 
     if not upper_manip_hit and high >= session_open + avg_manipulation
         upper_manip_hit := true
         upper_manip_time := bar_index - session_start_bar
+        
+        // If session optimization is enabled, record this hit for each test session
+        if enable_session_optimization
+            for i = 0 to array.size(test_sessions) - 1
+                test_session = array.get(test_sessions, i)
+                is_in_test_session = not na(time(timeframe.period, test_session, time_zone))
+                
+                if is_in_test_session
+                    // Record a hit
+                    array.push(test_session_hits, 1)  
+                    array.push(test_session_hit_ids, i)
+                    
+                    // Record move size after hit
+                    move_size = math.abs(close - (session_open + avg_manipulation))
+                    array.push(test_session_moves, move_size)
+                    array.push(test_session_move_ids, i)
+                    
+                    // Keep data size under control
+                    if array.size(test_session_hits) > test_period * array.size(test_sessions)
+                        array.shift(test_session_hits)
+                        array.shift(test_session_hit_ids)
+                    
+                    if array.size(test_session_moves) > test_period * array.size(test_sessions)
+                        array.shift(test_session_moves)
+                        array.shift(test_session_move_ids)
     
     // Lower manipulation level hit
     if not lower_manip_hit and low <= session_open - avg_manipulation
         lower_manip_hit := true
         lower_manip_time := bar_index - session_start_bar
+        
+        // Also record for session optimization if enabled
+        if enable_session_optimization
+            for i = 0 to array.size(test_sessions) - 1
+                test_session = array.get(test_sessions, i)
+                is_in_test_session = not na(time(timeframe.period, test_session, time_zone))
+                
+                if is_in_test_session
+                    // Record a hit
+                    array.push(test_session_hits, 1)  
+                    array.push(test_session_hit_ids, i)
+                    
+                    // Record move size after hit
+                    move_size = math.abs(close - (session_open - avg_manipulation))
+                    array.push(test_session_moves, move_size)
+                    array.push(test_session_move_ids, i)
+                    
+                    // Keep data size under control
+                    if array.size(test_session_hits) > test_period * array.size(test_sessions)
+                        array.shift(test_session_hits)
+                        array.shift(test_session_hit_ids)
+                    
+                    if array.size(test_session_moves) > test_period * array.size(test_sessions)
+                        array.shift(test_session_moves)
+                        array.shift(test_session_move_ids)
 
 // Calculate average manipulation times
 float avg_upper_manip_time = array.size(upper_manip_times) > 0 ? array.avg(upper_manip_times) : na
@@ -328,6 +489,55 @@ p75_distribution = array.size(distribution_distances) > 4 ? get_percentile(distr
 avg_success_manip = array.size(success_rates_manip) > 0 ? array.avg(success_rates_manip) : na
 avg_success_dist = array.size(success_rates_dist) > 0 ? array.avg(success_rates_dist) : na
 avg_move_after = array.size(moves_after_hit) > 0 ? array.avg(moves_after_hit) : na
+
+// === Calculate Session Optimization Scores ===
+if barstate.islast and enable_session_optimization
+    // Calculate metrics for each test session based on collected data
+    for i = 0 to array.size(test_sessions) - 1
+        // Filter data for this specific session
+        float[] session_vols = array.new_float(0)
+        float[] session_moves = array.new_float(0)
+        int hit_count = 0
+        int days_counted = 0
+        
+        // Process volatility data - need to count how many days we have data for
+        for v = 0 to array.size(test_session_vols) - 1
+            if v < array.size(test_session_vol_ids) and array.get(test_session_vol_ids, v) == i
+                array.push(session_vols, array.get(test_session_vols, v))
+                days_counted := days_counted + 1
+                
+        // Count total days we have data for this session
+        days_tested = math.min(days_counted, test_period)
+        
+        // Process hit data
+        for h = 0 to array.size(test_session_hits) - 1
+            if h < array.size(test_session_hit_ids) and array.get(test_session_hit_ids, h) == i
+                hit_count := hit_count + array.get(test_session_hits, h)
+        
+        // Process move size data
+        for m = 0 to array.size(test_session_moves) - 1
+            if m < array.size(test_session_move_ids) and array.get(test_session_move_ids, m) == i
+                array.push(session_moves, array.get(test_session_moves, m))
+        
+        // Calculate metrics for this test session
+        avg_volatility = array.size(session_vols) > 0 ? array.avg(session_vols) : 0.0
+        
+        // Calculate hit rate - number of hits divided by number of days we have data
+        hit_rate = days_tested > 0 ? hit_count / days_tested : 0.0
+        
+        // Average move size after hits
+        avg_move = array.size(session_moves) > 0 ? array.avg(session_moves) : 0.0
+        
+        // Update the session metrics arrays
+        array.set(session_volatility, i, avg_volatility)
+        array.set(manip_hit_rates, i, hit_rate)
+        array.set(move_after_hits, i, avg_move)
+        array.set(session_days_tested, i, days_tested)
+        
+        // Calculate overall optimization score
+        // Weighted combination of hit rate, volatility, and average move size
+        score = hit_rate * success_weight + (avg_volatility / 10) * volatility_weight + (avg_move / 10)
+        array.set(optimization_scores, i, score)
 
 // === Heatmap Color Functions (NEW) ===
 get_heatmap_color(base_color, strength) =>
@@ -717,6 +927,52 @@ if barstate.isfirst
     
     session_table := table.new(pos, cols, rows, bgcolor=color.white, border_width=1)
 
+// === Session Optimization Table ===
+var table optimization_table = na
+
+// Create optimization results table
+if barstate.isfirst and enable_session_optimization and show_optimization_table
+    opt_pos = table_position == "Top Left" ? position.top_right : 
+              table_position == "Top Right" ? position.top_left : 
+              table_position == "Bottom Left" ? position.bottom_right : position.bottom_left
+    
+    // Create table for optimization results
+    opt_cols = 4
+    opt_rows = array.size(test_sessions) + 1  // Header + rows for each test session
+    
+    optimization_table := table.new(opt_pos, opt_cols, opt_rows, bgcolor=color.new(color.black, 80), border_width=1)
+    
+    // Set header row
+    table.cell(optimization_table, 0, 0, "Session Time", text_color=color.white, bgcolor=color.new(color.blue, 20))
+    table.cell(optimization_table, 1, 0, "Hit Rate", text_color=color.white, bgcolor=color.new(color.blue, 20))
+    table.cell(optimization_table, 2, 0, "Volatility", text_color=color.white, bgcolor=color.new(color.blue, 20))
+    table.cell(optimization_table, 3, 0, "Score", text_color=color.white, bgcolor=color.new(color.blue, 20))
+
+// Update session optimization table with results
+if barstate.islast and enable_session_optimization and show_optimization_table
+    // Find the best session (highest score)
+    best_score = array.max(optimization_scores)
+    best_index = array.indexof(optimization_scores, best_score)
+    
+    // Update optimization table with all session data
+    for i = 0 to array.size(test_sessions) - 1
+        session_time_text = array.get(test_sessions, i)
+        hit_rate = array.get(manip_hit_rates, i)
+        volatility = array.get(session_volatility, i)
+        score = array.get(optimization_scores, i)
+        days_tested = array.get(session_days_tested, i)
+        
+        // Highlight best session
+        cell_color = i == best_index ? color.new(color.green, 70) : color.new(color.gray, 90)
+        text_color = i == best_index ? color.white : color.silver
+        
+        // Only show valid results (sessions with enough data)
+        if days_tested > 0
+            table.cell(optimization_table, 0, i + 1, session_time_text, bgcolor=cell_color, text_color=text_color)
+            table.cell(optimization_table, 1, i + 1, str.tostring(hit_rate * 100, "#.#") + "%", bgcolor=cell_color, text_color=text_color)
+            table.cell(optimization_table, 2, i + 1, str.tostring(volatility, "#.##") + "%", bgcolor=cell_color, text_color=text_color)
+            table.cell(optimization_table, 3, i + 1, str.tostring(score, "#.##"), bgcolor=cell_color, text_color=text_color)
+
 // Update table on each new bar
 if show_table
     text_size = table_size == "Small" ? size.tiny : table_size == "Normal" ? size.small : size.normal
@@ -758,6 +1014,24 @@ if show_table
         table.cell(session_table, 0, 6, "Avg M Time", text_color=color.black, text_size=text_size)
         avg_time_text = not na(avg_manip_time) ? format_manip_time(avg_manip_time) : "N/A"
         table.cell(session_table, 1, 6, avg_time_text, text_color=manipulation_color, text_size=text_size)
+
+// Alert if we've found a significantly better session
+if barstate.islast and enable_session_optimization
+    // Find best session
+    best_score = array.max(optimization_scores)
+    best_index = array.indexof(optimization_scores, best_score)
+    best_session = array.get(test_sessions, best_index)
+    
+    // Check if best session is significantly better than current
+    current_session_score = 0.0
+    for i = 0 to array.size(test_sessions) - 1
+        if array.get(test_sessions, i) == session_time
+            current_session_score := array.get(optimization_scores, i)
+    
+    // Alert if best session is at least 20% better than current
+    if best_score > current_session_score * 1.2 and best_session != session_time
+        label.new(bar_index, high, "Better session found: " + best_session + "\nScore: " + str.tostring(best_score, "#.##"), 
+                 color=color.new(color.blue, 80), textcolor=color.white, style=label.style_label_down)
 
 /// === Alert Condition Booleans ===
 sessionOpenCross = show_session_open and not na(session_open) and ta.cross(close, session_open)
